@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "kenteken"
+dynamic = ["version"]
+description = "Look up Dutch vehicle data by licence plate from the RDW open data API. Agent-friendly: JSON when piped, clispec schema, structured errors."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Ruben J. Jongejan", email = "ruben.jongejan@gmail.com" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Dutch",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/rvben/kenteken"
+Repository = "https://github.com/rvben/kenteken"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+strip = true

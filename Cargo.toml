@@ -1,0 +1,42 @@
+[package]
+name = "kenteken"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Look up Dutch vehicle data by licence plate from the RDW open data API. Agent-friendly: JSON when piped, clispec schema, structured errors."
+authors = ["Ruben Jongejan <ruben.jongejan@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/rvben/kenteken"
+homepage = "https://github.com/rvben/kenteken"
+keywords = ["rdw", "kenteken", "vehicle", "netherlands", "apk"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+
+[lib]
+name = "kenteken"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kenteken"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
+clap_complete = "4.6.5"
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde_norway = "0.9.42"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+jsonschema = { version = "0.46.5", default-features = false }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
