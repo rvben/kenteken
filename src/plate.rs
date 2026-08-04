@@ -40,11 +40,16 @@ impl Plate {
     /// Accepts any grouping a human might type (`X-99-XXX`, `x99 xxx`, `X99XXX`)
     /// and folds it to the single form RDW stores.
     pub fn parse(input: &str) -> Result<Self, PlateError> {
+        // ASCII case folding, not Unicode: `char::to_uppercase` maps 'ß' onto
+        // "SS", 'ı' onto 'I' and 'ſ' onto 'S', so folding first would erase the
+        // offending character before the check below ever sees it and send RDW
+        // a plate the caller never typed. This mapping touches only `a-z`, so
+        // an unusable character survives to be named in the error.
         let normalized: String = input
             .chars()
             .filter(|c| !SEPARATORS.contains(c) && !c.is_whitespace())
-            .flat_map(char::to_uppercase)
-            .collect();
+            .collect::<String>()
+            .to_ascii_uppercase();
 
         if normalized.is_empty() {
             return Err(PlateError::Empty);
@@ -56,9 +61,9 @@ impl Plate {
             return Err(PlateError::BadCharacter { normalized, found });
         }
 
-        // `chars().count()` and not `len()`: a multi-byte character would make
-        // the byte length lie, and it must be reported as a character error
-        // rather than a length one.
+        // `chars().count()` and not `len()`: the two agree only because the
+        // check above has already ruled out every multi-byte character, and a
+        // count keeps this honest if that check ever moves.
         let len = normalized.chars().count();
         if len != PLATE_LEN {
             return Err(PlateError::BadLength { normalized, len });
@@ -232,6 +237,29 @@ mod tests {
         // seven-character all-ASCII string. It must be rejected, not accepted.
         let result = Plate::parse("ß9XXXX");
         assert!(result.is_err(), "got {result:?}");
+    }
+
+    #[test]
+    fn uppercasing_never_invents_a_plate_the_caller_did_not_type() {
+        // Unicode case folding maps several non-ASCII characters onto ASCII:
+        // 'ß' onto "SS", 'ﬁ' onto "FI", 'ı' onto 'I', 'ſ' onto 'S'. Folding case
+        // before validating erases the offending character, so each of these
+        // would pass every later check and send RDW a six-character plate the
+        // caller never typed.
+        for (input, invented) in [
+            ("ß9XXX", "SS9XXX"),
+            ("ﬁ9XXX", "FI9XXX"),
+            ("ı99XXX", "I99XXX"),
+            ("ſ99XXX", "S99XXX"),
+        ] {
+            match Plate::parse(input) {
+                Err(_) => {}
+                Ok(plate) => panic!(
+                    "{input:?} was queried as {} (expected {invented} to be refused, not looked up)",
+                    plate.as_str()
+                ),
+            }
+        }
     }
 
     #[test]
