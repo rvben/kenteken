@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1](https://github.com/rvben/kenteken/compare/v0.2.0...v0.2.1) - 2026-08-05
+
+### Added
+
+- **lookup**: report tachograph expiry, towing, dimensions and the odometer year ([1598113](https://github.com/rvben/kenteken/commit/1598113d34dd7d7f7154abd1a0c486be4ef15028))
+
+### Fixed
+
+- **output**: keep initialisms and hyphenated makes readable on the card ([cc6f106](https://github.com/rvben/kenteken/commit/cc6f106ffe7d33cb559ea29409b4764ccc21eead))
+
 ## [0.2.0](https://github.com/rvben/kenteken/compare/v0.1.0...v0.2.0) - 2026-08-05
 
 ### Added
