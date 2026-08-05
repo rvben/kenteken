@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0](https://github.com/rvben/kenteken/compare/v0.1.0...v0.2.0) - 2026-08-05
+
+### Added
+
+- add recalls and inspections commands ([cc7c5a5](https://github.com/rvben/kenteken/commit/cc7c5a53a3809524c562d528906be1e0b411deb4))
+
 ## [0.1.0] - 2026-08-05
 
 ### Added
