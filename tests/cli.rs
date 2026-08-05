@@ -82,11 +82,72 @@ fn text_output_is_a_table_and_carries_no_ansi() {
     let out = run(&["--output", "text", "datasets"]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert!(out.stdout.contains("voertuigen"), "stdout:\n{}", out.stdout);
-    assert!(out.stdout.starts_with("NAME"), "stdout:\n{}", out.stdout);
+    assert!(out.stdout.starts_with("NAAM"), "stdout:\n{}", out.stdout);
     assert!(
         !out.stdout.contains('\u{1b}'),
         "text output contains escapes"
     );
+}
+
+#[test]
+fn the_language_flag_reaches_the_rendered_text() {
+    // Wiring, not vocabulary: the flag is parsed in `main`, resolved into a
+    // `Voice` in `lib`, and only then reaches the renderer. Both directions are
+    // asserted, because a build that ignored the flag would still pass one.
+    let dutch = run(&["--output", "text", "datasets"]);
+    assert_eq!(dutch.code, 0, "stderr: {}", dutch.stderr);
+    assert!(
+        dutch.stdout.starts_with("NAAM"),
+        "stdout:\n{}",
+        dutch.stdout
+    );
+
+    let english = run(&["--output", "text", "--lang", "en", "datasets"]);
+    assert_eq!(english.code, 0, "stderr: {}", english.stderr);
+    assert!(
+        english.stdout.starts_with("NAME"),
+        "stdout:\n{}",
+        english.stdout
+    );
+}
+
+#[test]
+fn the_language_the_schema_declares_by_default_is_the_one_the_binary_renders() {
+    // An agent reads `--lang`'s default from the contract and never passes the
+    // flag. A contract that named the other language would send it the card in a
+    // language it did not ask for, and nothing else here would notice.
+    let schema: Value = serde_json::from_str(&run(&["schema"]).stdout).expect("schema is JSON");
+    let declared = schema["global_args"]
+        .as_array()
+        .expect("global_args is an array")
+        .iter()
+        .find(|a| a["name"] == "--lang")
+        .expect("--lang is declared")["default"]
+        .as_str()
+        .expect("the default is a string");
+
+    let heading = run(&["--output", "text", "datasets"]);
+    let expected = match declared {
+        "nl" => "NAAM",
+        "en" => "NAME",
+        other => panic!("the contract declares an unknown language {other:?}"),
+    };
+    assert!(
+        heading.stdout.starts_with(expected),
+        "the contract says {declared:?}, stdout:\n{}",
+        heading.stdout
+    );
+}
+
+#[test]
+fn the_machine_formats_read_the_same_in_either_language() {
+    // JSON is the contract. A key or value that moved with `--lang` would break
+    // every consumer that pinned the English one.
+    let dutch = run(&["datasets"]);
+    let english = run(&["--lang", "en", "datasets"]);
+    assert_eq!(dutch.code, 0, "stderr: {}", dutch.stderr);
+    assert_eq!(english.code, 0, "stderr: {}", english.stderr);
+    assert_eq!(dutch.stdout, english.stdout);
 }
 
 #[test]

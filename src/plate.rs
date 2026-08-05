@@ -125,6 +125,11 @@ impl std::error::Error for PlateError {}
 mod tests {
     use super::*;
 
+    // Fixture plates throughout this crate are placeholders RDW holds no vehicle
+    // under, so no test or example names a real car. `X99XXX` is such a plate,
+    // six literal characters. In `accepts_every_sidecode_layout_present_in_the_dataset`
+    // below, `X` and `9` instead stand for any letter and any digit.
+
     fn ok(input: &str) -> String {
         Plate::parse(input)
             .unwrap_or_else(|e| panic!("{input:?} should parse: {e}"))

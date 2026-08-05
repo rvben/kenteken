@@ -49,6 +49,13 @@ fn global_args() -> Value {
             "description": "Output format. auto = text on a TTY, JSON when piped."
         },
         {
+            "name": "--lang",
+            "type": "string",
+            "enum": ["nl", "en"],
+            "default": "nl",
+            "description": "Language of the rendered text. Text output only: json, yaml and ndjson carry the same English keys and values in either language."
+        },
+        {
             "name": "--quiet",
             "type": "boolean",
             "default": false,

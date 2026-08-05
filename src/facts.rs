@@ -20,7 +20,7 @@
 //! free view, and `schema` lists the sentinels so a consumer of the raw columns
 //! can filter them too.
 
-use crate::date::{self, Date};
+use crate::date::Date;
 use serde_json::{Value, json};
 
 /// The strings RDW writes into a column that has no value.
@@ -127,33 +127,6 @@ pub fn odometer_judgement(row: &Value) -> Option<&'static str> {
         "geen oordeel" => Some("no_judgement"),
         _ => None,
     }
-}
-
-/// Group thousands so a six-figure price can be read at a glance.
-///
-/// The separator is the comma that goes with the tool's English labels; the
-/// numbers themselves are unchanged, and JSON output carries them unformatted.
-pub fn thousands(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
-    if n < 0 {
-        out.push('-');
-    }
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// Render a measurement without RDW's trailing zeros: `100.00` becomes `100`.
-pub fn measure(value: f64) -> String {
-    if value.fract() == 0.0 {
-        return thousands(value as i64);
-    }
-    format!("{value}")
 }
 
 /// Words RDW shouts that are spelled in capitals rather than shouted, so calming
@@ -524,18 +497,6 @@ pub fn electric_range_km(row: &Value) -> Option<f64> {
     .find_map(|key| number(row, key).filter(|km| *km > 0.0))
 }
 
-/// A date with the relative phrase a reader actually wants next to it.
-pub fn dated(date: &Date, today: Option<Date>) -> String {
-    match today {
-        Some(today) => format!(
-            "{}, {}",
-            date.iso(),
-            date::humanize_offset(today.days_until(date))
-        ),
-        None => date.iso(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,23 +619,6 @@ mod tests {
             let r = row(json!({ "tellerstandoordeel": raw }));
             assert_eq!(odometer_judgement(&r), expected, "input {raw:?}");
         }
-    }
-
-    #[test]
-    fn thousands_groups_from_the_right() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1_000), "1,000");
-        assert_eq!(thousands(91_144), "91,144");
-        assert_eq!(thousands(1_234_567), "1,234,567");
-        assert_eq!(thousands(-2_059), "-2,059");
-    }
-
-    #[test]
-    fn a_measurement_drops_the_zeros_rdw_pads_it_with() {
-        assert_eq!(measure(100.0), "100");
-        assert_eq!(measure(103.5), "103.5");
-        assert_eq!(measure(1500.0), "1,500");
     }
 
     #[test]

@@ -10,26 +10,37 @@ stdout is a TTY, JSON when it is not, a machine-readable contract under
 ```console
 $ kenteken lookup X-99-XXX
 X-99-XXX   Iveco 35s14
-  Type               Bedrijfsauto (N1), neerklapbare zijschotten, 3 seats, 2
-                     doors
-  APK expires        2027-12-11   in 1 year 4 months
-  First admitted     2024-12-11   1 year 8 months ago
-  Registered since   2024-12-11
-  Fuel               Diesel, 100 kW, 243 g/km CO2 (WLTP)
-  Engine             2,287 cm3
-  Mass               2,059 kg empty, 3,500 kg max
-  Towing             750 kg unbraked
-  Dimensions         691 cm long, 213 cm wide, 228 cm high
-  Catalogue price    EUR 91,144
-  Odometer           consistent   last reading 2024
-  Insured (WAM)      yes
-  Recall             none outstanding
+           Bedrijfsauto (N1), neerklapbare zijschotten, 3 zitplaatsen, 2 deuren
+
+  APK verloopt           2027-12-11   over 1 jaar 4 maanden
+  Tellerstand            logisch   laatste stand 2024
+  Verzekerd (WAM)        ja
+  Terugroepactie         geen openstaande
+
+  Eerste toelating       2024-12-11   1 jaar 8 maanden geleden
+  Tenaamstelling sinds   2024-12-11
+
+  Brandstof              Diesel, 100 kW, 243 g/km CO2 (WLTP)
+  Cilinderinhoud         2.287 cm3
+  Massa                  2.059 kg leeg, 3.500 kg max
+  Trekgewicht            750 kg ongeremd
+  Afmetingen             691 cm lang, 213 cm breed, 228 cm hoog
+  Catalogusprijs         EUR 91.144
 ```
+
+The card is Dutch, because the register is: the plate, the values RDW returns and
+the kentekenbewijs it stands in for are all Dutch, and `Tenaamstelling sinds` is
+the phrase printed on the document. `--lang en` renders the same card in English.
+Either way the JSON is unchanged; see [Language](#language).
+
+Every plate shown here is a placeholder that RDW holds no vehicle under, so no
+example points at someone's car. The values beside them are real register entries
+rendered by the tool, so the layout, wrapping and wording are what you will see.
 
 Anything that should stop you is shouted in words, not just coloured, so it
 survives being piped, redirected or read by someone who cannot tell red from
-grey: `EXPIRED`, `NOT INSURED`, `OPEN RECALL`, `INCONSISTENT`,
-`TRANSFER BLOCKED`, `TACHOGRAPH TAMPERING`.
+grey: `VERLOPEN`, `NIET VERZEKERD`, `OPENSTAAND`, `ONLOGISCH`,
+`OVERSCHRIJVING GEBLOKKEERD`, `TACHOGRAAF GEMANIPULEERD`.
 
 ## Install
 
@@ -66,7 +77,7 @@ never from the command line.
 Every command is read-only, and every command takes several plates at once:
 
 ```sh
-kenteken lookup X-99-XXX 9-XXX-99 12-ABC-3
+kenteken lookup X-99-XXX 9-XXX-99 9-XXXX-9
 ```
 
 Plates are normalized before anything is sent, so `X-99-XXX`, `x99xxx` and
@@ -80,7 +91,7 @@ request rather than two:
 
 ```console
 $ kenteken defects 9-XXX-99 --limit 3
-DATE        CODE  DEFECT
+DATUM       CODE  GEBREK
 2024-11-21  205   Band onvoldoende profiel
 2024-11-21  419   Blokkering gordel werkt niet (goed)
 2024-11-21  516   Dimlicht onjuist afgesteld
@@ -102,27 +113,29 @@ what it can cause. `recalls` reads all three and prints a card per recall:
 
 ```console
 $ kenteken recalls 9-XXXX-9
-9-XXXX-9   MGP070060   OPEN
-  Defect             De mogelijkheid bestaat dat de bouten van de
-                     stuurkoppeling op de stuuras niet goed zijn vast
-                     gedraaid.
-  Category           Motorrijtuigen en aanhangwagens - stuurinrichting
-  Hazard             Een (verkeers)ongeval met letselschade
-  Consequences       De kans bestaat dat de verbinding van de stuurkoppeling
-                     op de stuuras los gaat zitten. Dit kan worden herkend
-                     door optredend geluid tijdens inparkeren en manouvreren
-                     bij lage snelheid. Na verloop van tijd kan dit leiden tot
-                     losraken van deze koppeling en onbestuurbaar worden van
-                     het voertuig.
-  Repair             De producent roept de betreffende voertuigen terug, neemt
-                     maatregelen om het defect te verhelpen. De
-                     voertuigeigenaar wordt uitgenodigd een afspraak te maken
-                     met een merkdealer. De dealer zal de stuurkoppeling dan
-                     vervangen.
-  Reported by        Louwman Parts & Service B.V.
-  More information   0162-585217
-  Published          2013-03-28   7,500 vehicles in the action
-  Owners informed    2007-11-06
+9-XXXX-9   MGP070060   OPENSTAAND
+
+  Gebrek                   De mogelijkheid bestaat dat de bouten van de
+                           stuurkoppeling op de stuuras niet goed zijn vast
+                           gedraaid.
+  Categorie                Motorrijtuigen en aanhangwagens - stuurinrichting
+  Risico                   Een (verkeers)ongeval met letselschade
+  Gevolgen                 De kans bestaat dat de verbinding van de
+                           stuurkoppeling op de stuuras los gaat zitten. Dit
+                           kan worden herkend door optredend geluid tijdens
+                           inparkeren en manouvreren bij lage snelheid. Na
+                           verloop van tijd kan dit leiden tot losraken van
+                           deze koppeling en onbestuurbaar worden van het
+                           voertuig.
+  Herstel                  De producent roept de betreffende voertuigen terug,
+                           neemt maatregelen om het defect te verhelpen. De
+                           voertuigeigenaar wordt uitgenodigd een afspraak te
+                           maken met een merkdealer. De dealer zal de
+                           stuurkoppeling dan vervangen.
+  Gemeld door              Louwman Parts & Service B.V.
+  Meer informatie          0162-585217
+  Gepubliceerd             2013-03-28   7.500 voertuigen in de actie
+  Eigenaren geïnformeerd   2007-11-06
 ```
 
 RDW's prose is passed through in Dutch, untranslated and unabridged, because a
@@ -138,8 +151,8 @@ because a hazard is a sentence and a sentence joined to a shouted status wraps
 into a run-on phrase:
 
 ```
-  Recall             OPEN RECALL   see: kenteken recalls 9-XXXX-9
-  Recall hazard      Een (verkeers)ongeval met letselschade
+  Terugroepactie          OPENSTAAND   zie: kenteken recalls 9-XXXX-9
+  Risico terugroepactie   Een (verkeers)ongeval met letselschade
 ```
 
 That card asks about recalls only when the register says one is outstanding, so
@@ -152,7 +165,7 @@ the expiry date it produced:
 
 ```console
 $ kenteken inspections 9-XXX-99
-DATE        NOTIFICATION         FILED BY              VALID UNTIL
+DATUM       MELDING              GEMELD DOOR           GELDIG TOT
 2024-11-21  periodieke controle  APK Zware voertuigen  2025-11-21
 2024-02-29  periodieke controle  APK Zware voertuigen  2025-03-01
 2024-02-29  periodieke controle  Controleapparaten     2026-03-01
@@ -160,15 +173,14 @@ DATE        NOTIFICATION         FILED BY              VALID UNTIL
 
 Two bodies filing on one day is normal, and the two dates they set are not the
 same kind of date: the APK station's expires a year out, the tachograph
-workshop's two. The column is `VALID UNTIL` rather than `APK until` for exactly
-that reason, and the expiry belongs to the notification rather than to the
-vehicle.
+workshop's two. The column is `GELDIG TOT` rather than `APK tot` for exactly that
+reason, and the expiry belongs to the notification rather than to the vehicle.
 
 Inspection bodies file five kinds of notification. Three are routine
 (`periodieke controle`, `inbouw`, `uitbouw`); the other two, `manipulatie tacho`
 and `zegelverbreking tacho`, mean someone interfered with the instrument that
 records a professional driver's hours. Those two are shouted, as
-`TACHOGRAPH TAMPERING` and `TACHOGRAPH SEAL BROKEN`, and carry a stable
+`TACHOGRAAF GEMANIPULEERD` and `TACHOGRAAFZEGEL VERBROKEN`, and carry a stable
 `derived.alarm` for a consumer that would rather match a value than a phrase.
 
 ### Raw datasets
@@ -215,6 +227,37 @@ corrupt the stream. Text says it in words.
 
 `--fields` keeps only the named columns. A field present in no row is a usage
 error rather than a silently empty column.
+
+### Language
+
+`--lang` takes `nl` (the default) or `en`, and moves the rendered text only:
+
+```console
+$ kenteken lookup X-99-XXX --lang en -o text | head -4
+X-99-XXX   Iveco 35s14
+           Bedrijfsauto (N1), neerklapbare zijschotten, 3 seats, 2 doors
+
+  APK expires        2027-12-11   in 1 year 4 months
+```
+
+Dutch is the default because the register is Dutch: `Tenaamstelling sinds` and
+`Cilinderinhoud` are the words on the kentekenbewijs, so the card reads as the
+document it stands in for rather than as a translation of it. Numbers follow the
+language, `2.287 cm3` in Dutch and `2,287 cm3` in English, since `1,880 kg` reads
+to a Dutch eye as a weight just under two kilos.
+
+RDW's own values are never translated in either language. A colour is `Grijs`, a
+body is `hatchback`, a recall is described in RDW's Dutch, and the words RDW files
+its verdicts under (`Openstaand`, `Logisch`) are what the Dutch card says.
+
+Everything a program reads stays English and stays put:
+
+- `json`, `yaml` and `ndjson` are byte-identical under either language. Keys,
+  `derived` values and `derived.alarm` are the contract, so `--lang` cannot move
+  them.
+- `schema`, `--help` and the completion scripts are English.
+- The notes on stderr and the error envelope are English, because they talk about
+  flags and exit codes and share their wording with the JSON they accompany.
 
 ## What RDW sent, and what it means
 
@@ -307,8 +350,7 @@ initialism nobody has listed yet is still calmed.
 
 ```
 99-XX-99   Mercedes-Benz 208 CDI
-  Type               Personenauto (M1), MPV, 9 seats
-  Colour             Wit
+          Personenauto (M1), MPV, 9 zitplaatsen, Wit
 ```
 
 `apk_expired` is `null` rather than `false` when there is no expiry date: a
@@ -320,8 +362,8 @@ dates routinely disagree, and one can be long past while the other is
 comfortably in hand:
 
 ```
-  APK expires          2025-11-21   EXPIRED 8 months ago
-  Tachograph expires   2026-03-01   EXPIRED 5 months ago
+  APK verloopt           2025-11-21   VERLOPEN 8 maanden geleden
+  Tachograaf verloopt    2026-03-01   VERLOPEN 5 maanden geleden
 ```
 
 Most vehicles have no tachograph, and for them all three keys are `null`.
@@ -386,8 +428,8 @@ about:
   not one row in 16.8 million carries a `0`.
 
 `cilinderinhoud`, `catalogusprijs` and both the mass and towing columns behave
-like `seats`, holding no zero anywhere. So a card can say `0 doors`, and will
-never say `0 cm long`.
+like `seats`, holding no zero anywhere. So a card can say `0 deuren`, and will
+never say `0 cm lang`.
 
 ## Paging returns the same rows twice
 
@@ -419,8 +461,8 @@ keeps them apart everywhere:
   error with exit 4.
 - **Registered, nothing in this dataset.** The vehicle exists but has no rows
   here. It is listed in `no_rows` and the run exits 0. In text, `defects` says
-  so positively: *"X99XXX is registered, with no defects recorded at
-  inspection"*, never a blank table that reads like a failed lookup.
+  so positively: *"X99XXX is geregistreerd, zonder gebreken vastgesteld bij
+  keuring"*, never a blank table that reads like a failed lookup.
 - **Some of each.** With several plates, the ones that resolved are returned and
   the ones that did not are named on stderr, and the run exits 1 (`partial`).
 

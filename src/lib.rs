@@ -35,6 +35,7 @@ pub mod rdw;
 pub mod recall;
 pub mod schema;
 pub mod tellerstand;
+pub mod text;
 
 pub use error::{EXIT_PARTIAL, KentekenError};
 pub use plate::{Plate, PlateError};
@@ -127,6 +128,9 @@ pub struct Request {
     pub format: OutputFormat,
     /// Whether the destination can render ANSI escapes.
     pub style: output::Style,
+    /// Which language the rendered text speaks. Text only: the JSON contract,
+    /// `schema` and error kinds are English in every language.
+    pub lang: text::Lang,
     pub limit: usize,
     pub offset: usize,
     /// Field names to keep, or `None` for every field.
@@ -216,7 +220,12 @@ where
     };
 
     Ok(Outcome {
-        stdout: output::render(&envelope, &request.command, request.format, request.style),
+        stdout: output::render(
+            &envelope,
+            &request.command,
+            request.format,
+            output::Voice::new(request.style, request.lang),
+        ),
         not_found,
         no_rows,
         shown,
@@ -728,6 +737,7 @@ mod tests {
             command,
             format: OutputFormat::Json,
             style: output::Style::Plain,
+            lang: text::Lang::Nl,
             limit: DEFAULT_LIMIT,
             offset: 0,
             fields: None,

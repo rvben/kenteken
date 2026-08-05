@@ -10,8 +10,8 @@
 //! so the warning survives being piped, redirected, or read by someone who
 //! cannot distinguish red from grey.
 
-use crate::date;
 use crate::facts;
+use crate::text::*;
 use crate::{Command, OutputFormat};
 use serde_json::Value;
 
@@ -47,8 +47,79 @@ impl Style {
     }
 }
 
+/// How the text is spoken: in which language, and dressed how.
+///
+/// One value rather than two parameters, because the two travel together
+/// through every renderer on the way down. Formatting a number is a question of
+/// language and not of decoration, so grouping and phrasing live here beside the
+/// escapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Voice {
+    style: Style,
+    lang: Lang,
+}
+
+impl Voice {
+    pub fn new(style: Style, lang: Lang) -> Self {
+        Voice { style, lang }
+    }
+
+    fn bold(self, text: &str) -> String {
+        self.style.bold(text)
+    }
+
+    fn dim(self, text: &str) -> String {
+        self.style.dim(text)
+    }
+
+    fn alarm(self, text: &str) -> String {
+        self.style.alarm(text)
+    }
+
+    fn say(self, phrase: &Phrase) -> &'static str {
+        self.lang.say(phrase)
+    }
+
+    /// A phrase with its placeholder filled in, shouted in red.
+    ///
+    /// The two go together everywhere they appear: what the card shouts is what
+    /// it wants the reader to stop at, and it is always a whole statement rather
+    /// than a word with a plain tail.
+    fn alarm_fill(self, phrase: &Phrase, value: &str) -> String {
+        self.alarm(&self.lang.fill(phrase, value))
+    }
+
+    fn fill(self, phrase: &Phrase, value: &str) -> String {
+        self.lang.fill(phrase, value)
+    }
+
+    fn count(self, count: i64, noun: &Noun) -> String {
+        self.lang.count(count, noun)
+    }
+
+    fn thousands(self, value: i64) -> String {
+        self.lang.thousands(value)
+    }
+
+    fn measure(self, value: f64) -> String {
+        self.lang.measure(value)
+    }
+
+    fn offset(self, days: i64) -> String {
+        self.lang.offset(days)
+    }
+
+    fn span(self, days: i64) -> String {
+        self.lang.span(days)
+    }
+}
+
 /// Render the envelope in the requested format.
-pub fn render(envelope: &Value, command: &Command, format: OutputFormat, style: Style) -> String {
+///
+/// `voice` reaches the text renderer only. JSON, YAML and NDJSON are the machine
+/// contract and are identical in every language: translating a key, or grouping
+/// a number with a separator, would break every consumer that parses them.
+pub fn render(envelope: &Value, command: &Command, format: OutputFormat, voice: Voice) -> String {
     match format {
         OutputFormat::Json => serde_json::to_string_pretty(envelope).expect("envelope serializes"),
         OutputFormat::Yaml => serde_norway::to_string(envelope).expect("envelope serializes"),
@@ -57,7 +128,7 @@ pub fn render(envelope: &Value, command: &Command, format: OutputFormat, style: 
             .map(|item| serde_json::to_string(item).expect("item serializes"))
             .collect::<Vec<_>>()
             .join("\n"),
-        OutputFormat::Text => text(envelope, command, style),
+        OutputFormat::Text => text(envelope, command, voice),
     }
 }
 
@@ -68,13 +139,13 @@ fn items(envelope: &Value) -> &[Value] {
         .unwrap_or(&[])
 }
 
-fn text(envelope: &Value, command: &Command, style: Style) -> String {
+fn text(envelope: &Value, command: &Command, voice: Voice) -> String {
     let items = items(envelope);
     if items.is_empty() {
-        return empty_text(envelope, command);
+        return empty_text(envelope, command, voice);
     }
     match command {
-        Command::Datasets => dataset_table(items),
+        Command::Datasets => dataset_table(items, voice),
         Command::Raw { .. } => generic_table(items),
         // `--fields` can project the derived block away. Falling back to the raw
         // table then shows exactly the columns that were asked for, rather than
@@ -82,20 +153,20 @@ fn text(envelope: &Value, command: &Command, style: Style) -> String {
         _ if !items.iter().all(|i| derived(i).is_some()) => generic_table(items),
         Command::Lookup { .. } => items
             .iter()
-            .map(|item| vehicle_card(item, style))
+            .map(|item| vehicle_card(item, voice))
             .collect::<Vec<_>>()
             .join("\n\n"),
-        Command::Defects { .. } => defect_table(items),
-        Command::Fuel { .. } => fuel_table(items),
+        Command::Defects { .. } => defect_table(items, voice),
+        Command::Fuel { .. } => fuel_table(items, voice),
         // Recalls are prose, not columns: a defect description and a repair
         // instruction are sentences, and a table would either clip them or make
         // a line thousands of characters wide.
         Command::Recalls { .. } => items
             .iter()
-            .map(|item| recall_card(item, style))
+            .map(|item| recall_card(item, voice))
             .collect::<Vec<_>>()
             .join("\n\n"),
-        Command::Inspections { .. } => inspection_table(items, style),
+        Command::Inspections { .. } => inspection_table(items, voice),
     }
 }
 
@@ -105,30 +176,25 @@ fn derived(item: &Value) -> Option<&Value> {
 }
 
 /// What to say when there is nothing to show but nothing went wrong either.
-fn empty_text(envelope: &Value, command: &Command) -> String {
+fn empty_text(envelope: &Value, command: &Command, voice: Voice) -> String {
     let no_rows = string_list(&envelope["no_rows"]);
     if no_rows.is_empty() {
-        return "no rows".to_string();
+        return voice.say(&NO_ROWS).to_string();
     }
     let subject = no_rows.join(", ");
-    match command {
-        // Stated positively and explicitly. "no rows" next to a registered plate
-        // invites the reader to assume the lookup failed.
-        Command::Defects { .. } => {
-            format!("{subject} is registered, with no defects recorded at inspection")
-        }
-        Command::Fuel { .. } => format!("{subject} is registered, with no fuel rows recorded"),
+    // Stated positively and explicitly. "no rows" next to a registered plate
+    // invites the reader to assume the lookup failed.
+    let phrase = match command {
+        Command::Defects { .. } => &NO_DEFECTS,
+        Command::Fuel { .. } => &NO_FUEL,
         // "No recalls" is the answer people are hoping for, so it says what it
         // means: RDW has never issued one that reaches this vehicle, which is
         // not the same as one being open and undescribed.
-        Command::Recalls { .. } => {
-            format!("{subject} is registered, with no recalls on record, open or repaired")
-        }
-        Command::Inspections { .. } => {
-            format!("{subject} is registered, with no notifications from inspection bodies")
-        }
-        _ => format!("{subject} is registered, with no rows in this dataset"),
-    }
+        Command::Recalls { .. } => &NO_RECALLS,
+        Command::Inspections { .. } => &NO_INSPECTIONS,
+        _ => &NO_DATASET_ROWS,
+    };
+    voice.fill(phrase, &subject)
 }
 
 fn string_list(value: &Value) -> Vec<&str> {
@@ -188,7 +254,7 @@ fn card(
     title: String,
     subtitle: Option<String>,
     groups: Vec<Vec<(&str, String)>>,
-    style: Style,
+    voice: Voice,
 ) -> String {
     let width = groups
         .iter()
@@ -212,7 +278,7 @@ fn card(
                 .enumerate()
             {
                 match i {
-                    0 => out.push_str(&format!("  {}{pad}   {line}\n", style.dim(label))),
+                    0 => out.push_str(&format!("  {}{pad}   {line}\n", voice.dim(label))),
                     _ => out.push_str(&format!("{}{line}\n", " ".repeat(indent))),
                 }
             }
@@ -268,7 +334,7 @@ fn visible_len(text: &str) -> usize {
 }
 
 /// One vehicle, as the card `kenteken lookup` prints.
-fn vehicle_card(item: &Value, style: Style) -> String {
+fn vehicle_card(item: &Value, voice: Voice) -> String {
     let d = derived(item).expect("caller checked the derived block is present");
 
     let name = [s(d, "make"), s(d, "model")]
@@ -277,7 +343,7 @@ fn vehicle_card(item: &Value, style: Style) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     let plate = s(d, "plate").unwrap_or("?");
-    let title = style.bold(&match name.is_empty() {
+    let title = voice.bold(&match name.is_empty() {
         true => plate.to_string(),
         false => format!("{plate}   {}", facts::title_case(&name)),
     });
@@ -286,7 +352,7 @@ fn vehicle_card(item: &Value, style: Style) -> String {
     // identify it rather than describe its condition, and they belong to the
     // heading for the same reason the make does. Aligned under the name, so the
     // plate keeps the left edge to itself.
-    let subtitle = identity_line(d).map(|identity| {
+    let subtitle = identity_line(d, voice).map(|identity| {
         let indent = visible_len(plate) + 3;
         format!("{}{identity}", " ".repeat(indent))
     });
@@ -295,28 +361,48 @@ fn vehicle_card(item: &Value, style: Style) -> String {
     // what is wrong with it, and what it may still be used or sold for. First,
     // because it is what a plate gets looked up for.
     let mut status: Vec<(&str, String)> = Vec::new();
-    push(&mut status, "APK expires", expiry_line(d, "apk", style));
     push(
         &mut status,
-        "Tachograph expires",
-        expiry_line(d, "tachograph", style),
+        voice.say(&APK_EXPIRES),
+        expiry_line(d, "apk", voice),
     );
-    push(&mut status, "Odometer", odometer_line(d, style));
-    push(&mut status, "Odometer note", odometer_reason_line(d));
-    push(&mut status, "Insured (WAM)", insured_line(d, style));
-    push(&mut status, "Recall", recall_line(d, style));
-    push(&mut status, "Recall hazard", recall_hazard_line(d));
+    push(
+        &mut status,
+        voice.say(&TACHOGRAPH_EXPIRES),
+        expiry_line(d, "tachograph", voice),
+    );
+    push(&mut status, voice.say(&ODOMETER), odometer_line(d, voice));
+    push(
+        &mut status,
+        voice.say(&ODOMETER_NOTE),
+        odometer_reason_line(d),
+    );
+    push(&mut status, voice.say(&INSURED), insured_line(d, voice));
+    push(&mut status, voice.say(&RECALL), recall_line(d, voice));
+    push(
+        &mut status,
+        voice.say(&RECALL_HAZARD),
+        recall_hazard_line(d),
+    );
     // Shown only when set. An exceptional flag that is off is not worth a line,
     // and the tri-state that keeps "off" apart from "not reported" is in the
     // derived block for anything that needs to tell them apart.
-    push(&mut status, "Exported", when(b(d, "exported"), "yes"));
-    push(&mut status, "Taxi", when(b(d, "taxi"), "yes"));
     push(
         &mut status,
-        "Registration",
+        voice.say(&EXPORTED),
+        when(b(d, "exported"), voice.say(&YES)),
+    );
+    push(
+        &mut status,
+        voice.say(&TAXI),
+        when(b(d, "taxi"), voice.say(&YES)),
+    );
+    push(
+        &mut status,
+        voice.say(&REGISTRATION),
         when(
             b(d, "transferable").map(|t| !t),
-            &style.alarm("TRANSFER BLOCKED"),
+            &voice.alarm(voice.say(&TRANSFER_BLOCKED)),
         ),
     );
 
@@ -324,53 +410,57 @@ fn vehicle_card(item: &Value, style: Style) -> String {
     let mut history: Vec<(&str, String)> = Vec::new();
     push(
         &mut history,
-        "First admitted",
-        since_line(d, "first_admission", "age_days"),
+        voice.say(&FIRST_ADMITTED),
+        since_line(d, "first_admission", "age_days", voice),
     );
-    push(&mut history, "On the Dutch register", dutch_line(d));
     push(
         &mut history,
-        "Registered since",
+        voice.say(&DUTCH_REGISTER),
+        dutch_line(d, voice),
+    );
+    push(
+        &mut history,
+        voice.say(&REGISTERED_SINCE),
         s(d, "registered_since").map(str::to_string),
     );
 
     // What it is made of and what it can carry: the figures that do not change
     // between one lookup and the next.
     let mut spec: Vec<(&str, String)> = Vec::new();
-    push(&mut spec, "Fuel", fuel_line(item));
+    push(&mut spec, voice.say(&FUEL), fuel_line(item, voice));
     push(
         &mut spec,
-        "Engine",
-        n(d, "engine_cc").map(|cc| format!("{} cm3", facts::thousands(cc as i64))),
+        voice.say(&ENGINE),
+        n(d, "engine_cc").map(|cc| format!("{} cm3", voice.thousands(cc as i64))),
     );
     push(
         &mut spec,
-        "Energy label",
+        voice.say(&ENERGY_LABEL),
         s(d, "energy_label").map(str::to_string),
     );
-    push(&mut spec, "Mass", mass_line(d));
-    push(&mut spec, "Towing", towing_line(d));
-    push(&mut spec, "Dimensions", dimensions_line(d));
+    push(&mut spec, voice.say(&MASS), mass_line(d, voice));
+    push(&mut spec, voice.say(&TOWING), towing_line(d, voice));
+    push(&mut spec, voice.say(&DIMENSIONS), dimensions_line(d, voice));
     push(
         &mut spec,
-        "Catalogue price",
-        n(d, "catalogue_price_eur").map(|p| format!("EUR {}", facts::thousands(p as i64))),
+        voice.say(&CATALOGUE_PRICE),
+        n(d, "catalogue_price_eur").map(|p| format!("EUR {}", voice.thousands(p as i64))),
     );
     push(
         &mut spec,
-        "VIN location",
+        voice.say(&VIN_LOCATION),
         s(d, "vin_location").map(str::to_string),
     );
 
-    card(title, subtitle, vec![status, history, spec], style)
+    card(title, subtitle, vec![status, history, spec], voice)
 }
 
 /// What the vehicle is, as one line: kind, body, capacity and colour.
 ///
 /// Four labelled rows would say the same thing and cost the card four lines to
 /// answer a question nobody asks one part of at a time.
-fn identity_line(d: &Value) -> Option<String> {
-    let parts: Vec<String> = [kind_line(d), colour_line(d)]
+fn identity_line(d: &Value, voice: Voice) -> Option<String> {
+    let parts: Vec<String> = [kind_line(d, voice), colour_line(d)]
         .into_iter()
         .flatten()
         .collect();
@@ -378,55 +468,67 @@ fn identity_line(d: &Value) -> Option<String> {
 }
 
 /// One recall, as the card `kenteken recalls` prints.
-fn recall_card(item: &Value, style: Style) -> String {
+fn recall_card(item: &Value, voice: Voice) -> String {
     let d = derived(item).expect("caller checked the derived block is present");
     let heading = format!(
         "{}   {}",
         s(d, "plate").unwrap_or("?"),
         s(d, "reference").unwrap_or("?")
     );
-    let title = format!("{}   {}", style.bold(&heading), recall_status(d, style));
+    let title = format!("{}   {}", voice.bold(&heading), recall_status(d, voice));
 
     let mut lines: Vec<(&str, String)> = Vec::new();
-    push(&mut lines, "Defect", s(d, "defect").map(str::to_string));
-    push(&mut lines, "Category", s(d, "category").map(str::to_string));
+    push(
+        &mut lines,
+        voice.say(&DEFECT),
+        s(d, "defect").map(str::to_string),
+    );
+    push(
+        &mut lines,
+        voice.say(&CATEGORY),
+        s(d, "category").map(str::to_string),
+    );
     let hazards = list(d, "hazards");
     push(
         &mut lines,
-        "Hazard",
-        (!hazards.is_empty()).then(|| style.alarm(&hazards.join("; "))),
+        voice.say(&HAZARD),
+        (!hazards.is_empty()).then(|| voice.alarm(&hazards.join("; "))),
     );
     push(
         &mut lines,
-        "Consequences",
+        voice.say(&CONSEQUENCES),
         s(d, "consequences").map(str::to_string),
     );
-    push(&mut lines, "Repair", s(d, "repair").map(str::to_string));
     push(
         &mut lines,
-        "Reported by",
+        voice.say(&REPAIR),
+        s(d, "repair").map(str::to_string),
+    );
+    push(
+        &mut lines,
+        voice.say(&REPORTED_BY),
         s(d, "manufacturer").map(str::to_string),
     );
-    push(&mut lines, "More information", contact_line(d));
-    push(&mut lines, "Published", published_line(d));
+    push(&mut lines, voice.say(&MORE_INFORMATION), contact_line(d));
+    push(&mut lines, voice.say(&PUBLISHED), published_line(d, voice));
     push(
         &mut lines,
-        "Owners informed",
+        voice.say(&OWNERS_INFORMED),
         s(d, "owners_informed").map(str::to_string),
     );
     // One group: a recall is a single account of one fault, and splitting it
     // would put gaps between sentences that are read together.
-    card(title, None, vec![lines], style)
+    card(title, None, vec![lines], voice)
 }
 
 /// Whether this recall is still outstanding, said in words.
-fn recall_status(d: &Value, style: Style) -> String {
+fn recall_status(d: &Value, voice: Voice) -> String {
     match b(d, "open") {
-        Some(true) => style.alarm("OPEN"),
-        Some(false) => "repaired".to_string(),
+        Some(true) => voice.alarm(voice.say(&RECALL_OPEN)),
+        Some(false) => voice.say(&RECALL_REPAIRED).to_string(),
         // RDW filed the recall against this vehicle but recorded no status. That
         // is not a repair, and it must not read as one.
-        None => "status not reported".to_string(),
+        None => voice.say(&RECALL_NO_STATUS).to_string(),
     }
 }
 
@@ -438,13 +540,13 @@ fn contact_line(d: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("  |  "))
 }
 
-fn published_line(d: &Value) -> Option<String> {
+fn published_line(d: &Value, voice: Voice) -> Option<String> {
     let published = s(d, "published")?;
     Some(match n(d, "vehicles_affected") {
-        Some(count) => format!(
-            "{published}   {} vehicles in the action",
-            facts::thousands(count as i64)
-        ),
+        Some(count) => {
+            let fleet = voice.count(count as i64, &VEHICLE);
+            format!("{published}   {}", voice.fill(&IN_THE_ACTION, &fleet))
+        }
         None => published.to_string(),
     })
 }
@@ -462,8 +564,8 @@ fn when(flag: Option<bool>, text: &str) -> Option<String> {
     flag.unwrap_or(false).then(|| text.to_string())
 }
 
-/// `Personenauto (M1), MPV, 5 seats, 4 doors`: what kind of vehicle this is.
-fn kind_line(d: &Value) -> Option<String> {
+/// `Personenauto (M1), MPV, 5 zitplaatsen, 4 deuren`: what kind of vehicle this is.
+fn kind_line(d: &Value, voice: Voice) -> Option<String> {
     let head = match (s(d, "kind"), s(d, "eu_category")) {
         (Some(kind), Some(cat)) => format!("{kind} ({cat})"),
         (Some(kind), None) => kind.to_string(),
@@ -475,8 +577,8 @@ fn kind_line(d: &Value) -> Option<String> {
         s(d, "body").map(facts::title_case),
         // `0 doors` is printed rather than hidden. It is what RDW recorded, and
         // on the trailer or motorcycle that carries it, it is true.
-        n(d, "seats").map(|c| quantity(c as i64, "seat")),
-        n(d, "doors").map(|c| quantity(c as i64, "door")),
+        n(d, "seats").map(|c| voice.count(c as i64, &SEAT)),
+        n(d, "doors").map(|c| voice.count(c as i64, &DOOR)),
     ]
     .into_iter()
     .flatten()
@@ -484,28 +586,20 @@ fn kind_line(d: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// `1 seat`, `5 seats`.
-fn quantity(count: i64, unit: &str) -> String {
-    match count {
-        1 => format!("1 {unit}"),
-        n => format!("{} {unit}s", facts::thousands(n)),
-    }
-}
-
 /// A dated deadline: how long is left, and a shout once it has passed.
 ///
 /// Shared by the two inspections the register dates itself. The APK is the
 /// reason most people run this tool; the tachograph is the reason a haulier
 /// does, and it runs on a cycle of its own.
-fn expiry_line(d: &Value, prefix: &str, style: Style) -> Option<String> {
+fn expiry_line(d: &Value, prefix: &str, voice: Voice) -> Option<String> {
     let expiry = s(d, &format!("{prefix}_expiry"))?;
     let Some(days) = n(d, &format!("{prefix}_days_remaining")) else {
         // No clock, so no verdict. The date alone is still the honest answer.
         return Some(expiry.to_string());
     };
-    let phrase = date::humanize_offset(days as i64);
+    let phrase = voice.offset(days as i64);
     Some(match b(d, &format!("{prefix}_expired")) {
-        Some(true) => format!("{expiry}   {}", style.alarm(&format!("EXPIRED {phrase}"))),
+        Some(true) => format!("{expiry}   {}", voice.alarm_fill(&EXPIRED, &phrase)),
         _ => format!("{expiry}   {phrase}"),
     })
 }
@@ -514,13 +608,16 @@ fn expiry_line(d: &Value, prefix: &str, style: Style) -> Option<String> {
 ///
 /// A vehicle that may not tow has neither figure rather than a zero, so nothing
 /// here has to stand for "not permitted".
-fn towing_line(d: &Value) -> Option<String> {
-    let parts: Vec<String> = [("tow_braked_kg", "braked"), ("tow_unbraked_kg", "unbraked")]
-        .into_iter()
-        .filter_map(|(key, word)| {
-            n(d, key).map(|kg| format!("{} kg {word}", facts::thousands(kg as i64)))
-        })
-        .collect();
+fn towing_line(d: &Value, voice: Voice) -> Option<String> {
+    let parts: Vec<String> = [
+        ("tow_braked_kg", &TOW_BRAKED),
+        ("tow_unbraked_kg", &TOW_UNBRAKED),
+    ]
+    .into_iter()
+    .filter_map(|(key, word)| {
+        n(d, key).map(|kg| format!("{} kg {}", voice.thousands(kg as i64), voice.say(word)))
+    })
+    .collect();
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
@@ -528,25 +625,25 @@ fn towing_line(d: &Value) -> Option<String> {
 ///
 /// Named rather than laid out as `l x w x h`, because RDW routinely has one or
 /// two of the three and a positional form would need a placeholder for the rest.
-fn dimensions_line(d: &Value) -> Option<String> {
+fn dimensions_line(d: &Value, voice: Voice) -> Option<String> {
     let parts: Vec<String> = [
-        ("length_cm", "long"),
-        ("width_cm", "wide"),
-        ("height_cm", "high"),
+        ("length_cm", &LONG),
+        ("width_cm", &WIDE),
+        ("height_cm", &HIGH),
     ]
     .into_iter()
     .filter_map(|(key, word)| {
-        n(d, key).map(|cm| format!("{} cm {word}", facts::thousands(cm as i64)))
+        n(d, key).map(|cm| format!("{} cm {}", voice.thousands(cm as i64), voice.say(word)))
     })
     .collect();
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// A date with how long ago it was, when the tool knows today's date.
-fn since_line(d: &Value, date_key: &str, age_key: &str) -> Option<String> {
+fn since_line(d: &Value, date_key: &str, age_key: &str, voice: Voice) -> Option<String> {
     let date = s(d, date_key)?;
     Some(match n(d, age_key) {
-        Some(age) => format!("{date}   {}", date::humanize_offset(-(age as i64))),
+        Some(age) => format!("{date}   {}", voice.offset(-(age as i64))),
         None => date.to_string(),
     })
 }
@@ -560,17 +657,17 @@ fn since_line(d: &Value, date_key: &str, age_key: &str) -> Option<String> {
 /// among vehicles registered within a month of admission not one is flagged by
 /// RDW as having been registered abroad. So the line states the two facts and
 /// leaves the conclusion to the reader.
-fn dutch_line(d: &Value) -> Option<String> {
+fn dutch_line(d: &Value, voice: Voice) -> Option<String> {
     let date = s(d, "first_dutch_registration")?;
     let lag = n(d, "dutch_registration_lag_days")? as i64;
     if lag == 0 {
         return None;
     }
-    let direction = if lag > 0 { "after" } else { "before" };
-    Some(format!(
-        "{date}   {} {direction} first admission",
-        date::humanize_span(lag)
-    ))
+    let phrase = match lag > 0 {
+        true => &LAG_AFTER,
+        false => &LAG_BEFORE,
+    };
+    Some(format!("{date}   {}", voice.fill(phrase, &voice.span(lag))))
 }
 
 fn colour_line(d: &Value) -> Option<String> {
@@ -586,24 +683,24 @@ fn colour_line(d: &Value) -> Option<String> {
 /// Read from the rows rather than from the derived block, because a hybrid has
 /// power and emissions per fuel and the summary would otherwise report only the
 /// first one.
-fn fuel_line(item: &Value) -> Option<String> {
+fn fuel_line(item: &Value, voice: Voice) -> Option<String> {
     let rows = item.get("fuel")?.as_array()?;
     let parts: Vec<String> = rows
         .iter()
         .filter_map(|row| {
             let mut bits = vec![facts::text(row, "brandstof_omschrijving")?];
             if let Some(kw) = facts::power_kw(row) {
-                bits.push(format!("{} kW", facts::measure(kw)));
+                bits.push(format!("{} kW", voice.measure(kw)));
             }
             if let Some((co2, basis)) = facts::co2(row) {
                 bits.push(format!(
                     "{} g/km CO2 ({})",
-                    facts::measure(co2),
+                    voice.measure(co2),
                     basis.to_uppercase()
                 ));
             }
             if let Some(km) = facts::electric_range_km(row) {
-                bits.push(format!("{} km range", facts::measure(km)));
+                bits.push(format!("{} km {}", voice.measure(km), voice.say(&RANGE)));
             }
             Some(bits.join(", "))
         })
@@ -611,10 +708,13 @@ fn fuel_line(item: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("  +  "))
 }
 
-fn mass_line(d: &Value) -> Option<String> {
-    let empty = n(d, "mass_empty_kg").map(|m| format!("{} kg empty", facts::thousands(m as i64)));
-    let max = n(d, "mass_max_kg").map(|m| format!("{} kg max", facts::thousands(m as i64)));
-    let parts: Vec<String> = [empty, max].into_iter().flatten().collect();
+fn mass_line(d: &Value, voice: Voice) -> Option<String> {
+    let parts: Vec<String> = [("mass_empty_kg", &MASS_EMPTY), ("mass_max_kg", &MASS_MAX)]
+        .into_iter()
+        .filter_map(|(key, word)| {
+            n(d, key).map(|kg| format!("{} kg {}", voice.thousands(kg as i64), voice.say(word)))
+        })
+        .collect();
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
@@ -630,15 +730,22 @@ fn mass_line(d: &Value) -> Option<String> {
 /// without the other: 730,494 vehicles carry a reading year with no verdict
 /// against it, and dropping the line for want of a verdict would throw away the
 /// only odometer fact RDW has for them.
-fn odometer_line(d: &Value, style: Style) -> Option<String> {
+fn odometer_line(d: &Value, voice: Voice) -> Option<String> {
+    // In Dutch these render back to RDW's own three words, which `facts` turned
+    // into English tokens on the way in to keep the JSON contract stable. The
+    // card is where they go home.
     let verdict = s(d, "odometer").map(|verdict| match verdict {
-        "consistent" => "consistent".to_string(),
-        "inconsistent" => style.alarm("INCONSISTENT"),
+        "consistent" => voice.say(&ODOMETER_CONSISTENT).to_string(),
+        "inconsistent" => voice.alarm(voice.say(&ODOMETER_INCONSISTENT)),
+        "no_judgement" => voice.say(&ODOMETER_NO_JUDGEMENT).to_string(),
+        // A token this build has no phrase for is shown as RDW's own word rather
+        // than dropped, which keeps a new verdict visible instead of silent.
         other => other.replace('_', " "),
     });
     // Said as a year, not grouped as a quantity: RDW records 1961 through 2026,
     // and `2,016` would read as a distance rather than a date.
-    let year = n(d, "odometer_year").map(|year| format!("last reading {}", year as i64));
+    let year =
+        n(d, "odometer_year").map(|year| voice.fill(&LAST_READING, &(year as i64).to_string()));
     match (verdict, year) {
         (Some(verdict), Some(year)) => Some(format!("{verdict}   {year}")),
         (verdict, year) => verdict.or(year),
@@ -648,16 +755,23 @@ fn odometer_line(d: &Value, style: Style) -> Option<String> {
 /// RDW's own reason for that verdict, which is the interesting part when it
 /// declined to judge or found a jump.
 ///
+/// Quoted, because it is RDW speaking and not the tool. The sentence is Dutch in
+/// either language and stays that way: it is an official statement about one
+/// vehicle's history, and paraphrasing it would put words in RDW's mouth about
+/// something that carries legal weight. The quotation marks are what make that
+/// visible rather than leaving a stray Dutch sentence in an English card.
+///
 /// Left off a consistent history, where it only repeats that nothing is wrong.
 fn odometer_reason_line(d: &Value) -> Option<String> {
     s(d, "odometer").filter(|verdict| *verdict != "consistent")?;
-    s(d, "odometer_reason").map(str::to_string)
+    let reason = s(d, "odometer_reason")?.trim();
+    (!reason.is_empty()).then(|| format!("\"{reason}\""))
 }
 
-fn insured_line(d: &Value, style: Style) -> Option<String> {
+fn insured_line(d: &Value, voice: Voice) -> Option<String> {
     Some(match b(d, "insured")? {
-        true => "yes".to_string(),
-        false => style.alarm("NOT INSURED"),
+        true => voice.say(&YES).to_string(),
+        false => voice.alarm(voice.say(&NOT_INSURED)),
     })
 }
 
@@ -666,13 +780,13 @@ fn insured_line(d: &Value, style: Style) -> Option<String> {
 /// An open recall is the one thing on this card that asks the reader to act, so
 /// it says where the rest of it is rather than shouting two words and leaving no
 /// way to find out more.
-fn recall_line(d: &Value, style: Style) -> Option<String> {
+fn recall_line(d: &Value, voice: Voice) -> Option<String> {
     if !b(d, "open_recall")? {
-        return Some("none outstanding".to_string());
+        return Some(voice.say(&NONE_OUTSTANDING).to_string());
     }
-    let mut parts = vec![style.alarm("OPEN RECALL")];
+    let mut parts = vec![voice.alarm(voice.say(&OPEN_RECALL))];
     if let Some(plate) = s(d, "plate") {
-        parts.push(format!("see: kenteken recalls {plate}"));
+        parts.push(voice.fill(&SEE_RECALLS, plate));
     }
     Some(parts.join("   "))
 }
@@ -719,13 +833,13 @@ impl Col {
 }
 
 /// Read a cell out of a row's derived block.
-fn dcell(item: &Value, key: &str) -> String {
+fn dcell(item: &Value, key: &str, voice: Voice) -> String {
     let Some(d) = derived(item) else {
         return ABSENT.to_string();
     };
     match d.get(key) {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => facts::measure(n.as_f64().unwrap_or_default()),
+        Some(Value::Number(n)) => voice.measure(n.as_f64().unwrap_or_default()),
         Some(Value::Bool(v)) => v.to_string(),
         _ => ABSENT.to_string(),
     }
@@ -758,29 +872,33 @@ fn many_plates(items: &[Value]) -> bool {
     seen.len() > 1
 }
 
-fn defect_table(items: &[Value]) -> String {
+fn defect_table(items: &[Value], voice: Voice) -> String {
     let with_plate = many_plates(items);
     let mut cols = Vec::new();
     if with_plate {
-        cols.push(Col::left("PLATE"));
+        cols.push(Col::left(voice.say(&COL_PLATE)));
     }
-    cols.extend([Col::left("DATE"), Col::left("CODE"), Col::left("DEFECT")]);
+    cols.extend([
+        Col::left(voice.say(&COL_DATE)),
+        Col::left(voice.say(&COL_CODE)),
+        Col::left(voice.say(&COL_DEFECT)),
+    ]);
 
     let rows: Vec<Vec<String>> = items
         .iter()
         .map(|item| {
             let mut row = Vec::new();
             if with_plate {
-                row.push(dcell(item, "plate"));
+                row.push(dcell(item, "plate", voice));
             }
-            row.push(dcell(item, "inspection_date"));
-            row.push(dcell(item, "code"));
+            row.push(dcell(item, "inspection_date", voice));
+            row.push(dcell(item, "code", voice));
             // An unresolved code is marked as unresolved, never blank and never
             // a dash: "this build does not know the code" is a different fact
             // from "RDW reported no description".
             row.push(match derived(item).and_then(|d| s(d, "description")) {
                 Some(text) => text.to_string(),
-                None => "(code not in this build's table)".to_string(),
+                None => voice.say(&UNKNOWN_CODE).to_string(),
             });
             row
         })
@@ -788,19 +906,19 @@ fn defect_table(items: &[Value]) -> String {
     table(&cols, rows)
 }
 
-fn fuel_table(items: &[Value]) -> String {
+fn fuel_table(items: &[Value], voice: Voice) -> String {
     let with_plate = many_plates(items);
     let mut cols = Vec::new();
     if with_plate {
-        cols.push(Col::left("PLATE"));
+        cols.push(Col::left(voice.say(&COL_PLATE)));
     }
     cols.extend([
-        Col::left("FUEL"),
-        Col::right("KW"),
-        Col::right("CO2 G/KM"),
-        Col::left("BASIS"),
-        Col::right("RANGE KM"),
-        Col::left("EURO"),
+        Col::left(voice.say(&COL_FUEL)),
+        Col::right(voice.say(&COL_KW)),
+        Col::right(voice.say(&COL_CO2)),
+        Col::left(voice.say(&COL_BASIS)),
+        Col::right(voice.say(&COL_RANGE)),
+        Col::left(voice.say(&COL_EURO)),
     ]);
 
     let rows: Vec<Vec<String>> = items
@@ -808,17 +926,17 @@ fn fuel_table(items: &[Value]) -> String {
         .map(|item| {
             let mut row = Vec::new();
             if with_plate {
-                row.push(dcell(item, "plate"));
+                row.push(dcell(item, "plate", voice));
             }
             row.extend([
-                dcell(item, "fuel"),
-                dcell(item, "power_kw"),
-                dcell(item, "co2_g_per_km"),
+                dcell(item, "fuel", voice),
+                dcell(item, "power_kw", voice),
+                dcell(item, "co2_g_per_km", voice),
                 // Which test cycle produced the CO2 figure travels with it: a
                 // WLTP number and an NEDC number are not comparable.
-                dcell(item, "co2_basis"),
-                dcell(item, "electric_range_km"),
-                dcell(item, "euro_class"),
+                dcell(item, "co2_basis", voice),
+                dcell(item, "electric_range_km", voice),
+                dcell(item, "euro_class", voice),
             ]);
             row
         })
@@ -826,21 +944,21 @@ fn fuel_table(items: &[Value]) -> String {
     table(&cols, rows)
 }
 
-fn inspection_table(items: &[Value], style: Style) -> String {
+fn inspection_table(items: &[Value], voice: Voice) -> String {
     let with_plate = many_plates(items);
     let mut cols = Vec::new();
     if with_plate {
-        cols.push(Col::left("PLATE"));
+        cols.push(Col::left(voice.say(&COL_PLATE)));
     }
     cols.extend([
-        Col::left("DATE"),
-        Col::left("NOTIFICATION"),
-        Col::left("FILED BY"),
+        Col::left(voice.say(&COL_DATE)),
+        Col::left(voice.say(&COL_NOTIFICATION)),
+        Col::left(voice.say(&COL_FILED_BY)),
         // Not "APK until": the date expires the inspection that was filed, and a
         // tachograph workshop inspects on its own two-yearly cycle. Labelling its
         // row APK would hand a reader a roadworthiness date the vehicle has not
         // got, from the one body that never issues one.
-        Col::left("VALID UNTIL"),
+        Col::left(voice.say(&COL_VALID_UNTIL)),
     ]);
 
     let rows: Vec<Vec<String>> = items
@@ -848,13 +966,13 @@ fn inspection_table(items: &[Value], style: Style) -> String {
         .map(|item| {
             let mut row = Vec::new();
             if with_plate {
-                row.push(dcell(item, "plate"));
+                row.push(dcell(item, "plate", voice));
             }
             row.extend([
-                dcell(item, "date"),
-                notification_cell(item, style),
-                dcell(item, "accreditation"),
-                dcell(item, "expiry"),
+                dcell(item, "date", voice),
+                notification_cell(item, voice),
+                dcell(item, "accreditation", voice),
+                dcell(item, "expiry", voice),
             ]);
             row
         })
@@ -865,25 +983,30 @@ fn inspection_table(items: &[Value], style: Style) -> String {
 /// What kind of notification this was, shouted when it is a tachograph finding.
 ///
 /// Someone interfered with the instrument that records a professional driver's
-/// hours. It sits in a column of routine inspections, so it says so in English
-/// and in capitals; RDW's own wording stays in the row and the derived block.
-fn notification_cell(item: &Value, style: Style) -> String {
+/// hours. It sits in a column of routine inspections, so it says so in capitals;
+/// RDW's own wording stays in the row and the derived block.
+fn notification_cell(item: &Value, voice: Voice) -> String {
     let Some(d) = derived(item) else {
         return ABSENT.to_string();
     };
     match s(d, "alarm") {
-        Some("tachograph_tampering") => style.alarm("TACHOGRAPH TAMPERING"),
-        Some("tachograph_seal_broken") => style.alarm("TACHOGRAPH SEAL BROKEN"),
-        _ => dcell(item, "kind"),
+        Some("tachograph_tampering") => voice.alarm(voice.say(&TACHOGRAPH_TAMPERING)),
+        Some("tachograph_seal_broken") => voice.alarm(voice.say(&TACHOGRAPH_SEAL_BROKEN)),
+        _ => dcell(item, "kind", voice),
     }
 }
 
-fn dataset_table(items: &[Value]) -> String {
+/// The datasets this build knows, as `kenteken datasets` prints them.
+///
+/// The descriptions are English in both languages. They are the same strings the
+/// JSON contract and `schema` carry, describing what a caller gets back from each
+/// dataset rather than telling a reader about a vehicle.
+fn dataset_table(items: &[Value], voice: Voice) -> String {
     let cols = [
-        Col::left("NAME"),
-        Col::left("ID"),
-        Col::left("BY PLATE"),
-        Col::left("CONTENTS"),
+        Col::left(voice.say(&COL_NAME)),
+        Col::left(voice.say(&COL_ID)),
+        Col::left(voice.say(&COL_BY_PLATE)),
+        Col::left(voice.say(&COL_CONTENTS)),
     ];
     let rows: Vec<Vec<String>> = items
         .iter()
@@ -892,8 +1015,8 @@ fn dataset_table(items: &[Value]) -> String {
                 cell(item, "name"),
                 cell(item, "id"),
                 match item.get("plate_keyed") {
-                    Some(Value::Bool(true)) => "yes".into(),
-                    _ => "no".into(),
+                    Some(Value::Bool(true)) => voice.say(&YES).to_string(),
+                    _ => voice.say(&NO).to_string(),
                 },
                 cell(item, "description"),
             ]
@@ -1067,14 +1190,25 @@ mod tests {
         }
     }
 
+    /// The default voice: Dutch, with no escapes.
+    fn nl() -> Voice {
+        Voice::new(Style::Plain, Lang::Nl)
+    }
+
+    /// The same card under `--lang en`.
+    fn en() -> Voice {
+        Voice::new(Style::Plain, Lang::En)
+    }
+
+    /// Render as the tool does by default, which is Dutch.
     fn plain(env: &Value, command: &Command) -> String {
-        render(env, command, OutputFormat::Text, Style::Plain)
+        render(env, command, OutputFormat::Text, nl())
     }
 
     #[test]
     fn json_output_is_the_whole_envelope() {
         let env = envelope(json!([{"kenteken": "X99XXX"}]));
-        let rendered = render(&env, &lookup(), OutputFormat::Json, Style::Plain);
+        let rendered = render(&env, &lookup(), OutputFormat::Json, nl());
         let back: Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(back, env);
     }
@@ -1082,7 +1216,7 @@ mod tests {
     #[test]
     fn yaml_output_round_trips() {
         let env = envelope(json!([{"kenteken": "X99XXX"}]));
-        let rendered = render(&env, &lookup(), OutputFormat::Yaml, Style::Plain);
+        let rendered = render(&env, &lookup(), OutputFormat::Yaml, nl());
         let back: Value = serde_norway::from_str(&rendered).unwrap();
         assert_eq!(back, env);
     }
@@ -1090,7 +1224,7 @@ mod tests {
     #[test]
     fn ndjson_emits_one_valid_object_per_line_and_no_envelope() {
         let env = envelope(json!([{"a": 1}, {"a": 2}, {"a": 3}]));
-        let rendered = render(&env, &lookup(), OutputFormat::Ndjson, Style::Plain);
+        let rendered = render(&env, &lookup(), OutputFormat::Ndjson, nl());
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(lines.len(), 3);
         for line in lines {
@@ -1103,7 +1237,7 @@ mod tests {
     #[test]
     fn a_truncated_ndjson_stream_is_still_valid_records() {
         let env = envelope(json!([{"a": 1}, {"a": 2}, {"a": 3}]));
-        let rendered = render(&env, &lookup(), OutputFormat::Ndjson, Style::Plain);
+        let rendered = render(&env, &lookup(), OutputFormat::Ndjson, nl());
         let head: Vec<&str> = rendered.lines().take(2).collect();
         for line in head {
             serde_json::from_str::<Value>(line).expect("head of the stream stays parseable");
@@ -1124,7 +1258,7 @@ mod tests {
             OutputFormat::Yaml,
             OutputFormat::Ndjson,
         ] {
-            let rendered = render(&env, &lookup(), format, Style::Plain);
+            let rendered = render(&env, &lookup(), format, nl());
             assert!(
                 !rendered.contains('\u{1b}'),
                 "{format:?} emitted an escape sequence"
@@ -1138,7 +1272,7 @@ mod tests {
         // a JSON string would corrupt every consumer downstream.
         let env = envelope(json!([{"kenteken": "X99XXX", "vervaldatum_apk": "20200101"}]));
         for format in [OutputFormat::Json, OutputFormat::Yaml, OutputFormat::Ndjson] {
-            let rendered = render(&env, &lookup(), format, Style::Colour);
+            let rendered = render(&env, &lookup(), format, Voice::new(Style::Colour, Lang::Nl));
             assert!(!rendered.contains('\u{1b}'), "{format:?} carried an escape");
         }
     }
@@ -1154,9 +1288,14 @@ mod tests {
             "openstaande_terugroepactie_indicator": "Ja",
             "tellerstandoordeel": "Onlogisch",
         }]));
-        let coloured = render(&env, &lookup(), OutputFormat::Text, Style::Colour);
+        let coloured = render(
+            &env,
+            &lookup(),
+            OutputFormat::Text,
+            Voice::new(Style::Colour, Lang::Nl),
+        );
         let plain = plain(&env, &lookup());
-        for warning in ["EXPIRED", "NOT INSURED", "OPEN RECALL", "INCONSISTENT"] {
+        for warning in ["VERLOPEN", "NIET VERZEKERD", "OPENSTAAND", "ONLOGISCH"] {
             assert!(
                 plain.contains(warning),
                 "plain is missing {warning}:\n{plain}"
@@ -1173,6 +1312,12 @@ mod tests {
     fn an_expired_apk_says_so_in_words() {
         let env = envelope(json!([{"kenteken": "X99XXX", "vervaldatum_apk": "20200101"}]));
         let rendered = plain(&env, &lookup());
+        assert!(rendered.contains("VERLOPEN"), "rendered:\n{rendered}");
+        assert!(rendered.contains("2020-01-01"), "rendered:\n{rendered}");
+
+        // The same card under `--lang en`, because the shout is the point of the
+        // line and a language that lost it would still print the date.
+        let rendered = render(&env, &lookup(), OutputFormat::Text, en());
         assert!(rendered.contains("EXPIRED"), "rendered:\n{rendered}");
         assert!(rendered.contains("2020-01-01"), "rendered:\n{rendered}");
     }
@@ -1181,7 +1326,7 @@ mod tests {
     fn a_valid_apk_is_not_labelled_expired() {
         let env = envelope(json!([{"kenteken": "X99XXX", "vervaldatum_apk": "20991231"}]));
         let rendered = plain(&env, &lookup());
-        assert!(!rendered.contains("EXPIRED"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("VERLOPEN"), "rendered:\n{rendered}");
         assert!(rendered.contains("2099-12-31"), "rendered:\n{rendered}");
     }
 
@@ -1190,7 +1335,10 @@ mod tests {
         let env = envelope(json!([{"kenteken": "X99XXX", "merk": "IVECO"}]));
         let rendered = plain(&env, &lookup());
         assert!(!rendered.contains("APK"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Catalogue"), "rendered:\n{rendered}");
+        assert!(
+            !rendered.contains("Catalogusprijs"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -1200,7 +1348,7 @@ mod tests {
         let numeric = envelope(json!([{"kenteken": "X99XXX", "catalogusprijs": 91144}]));
         let stringy = envelope(json!([{"kenteken": "X99XXX", "catalogusprijs": "91144"}]));
         let a = plain(&numeric, &lookup());
-        assert!(a.contains("EUR 91,144"), "rendered:\n{a}");
+        assert!(a.contains("EUR 91.144"), "rendered:\n{a}");
         assert_eq!(a, plain(&stringy, &lookup()));
     }
 
@@ -1213,9 +1361,30 @@ mod tests {
             "toegestane_maximum_massa_voertuig": "3500",
         }]));
         let rendered = plain(&env, &lookup());
-        assert!(rendered.contains("EUR 91,144"), "rendered:\n{rendered}");
-        assert!(rendered.contains("1,880 kg empty"), "rendered:\n{rendered}");
-        assert!(rendered.contains("3,500 kg max"), "rendered:\n{rendered}");
+        assert!(rendered.contains("EUR 91.144"), "rendered:\n{rendered}");
+        assert!(rendered.contains("1.880 kg leeg"), "rendered:\n{rendered}");
+        assert!(rendered.contains("3.500 kg max"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn the_grouping_mark_follows_the_language_and_not_the_other_way_round() {
+        // A Dutch reader parses `1,880 kg` as a weight just under two kilos, so
+        // an English separator on a Dutch card is briefly wrong rather than
+        // merely foreign. Both directions are asserted: a card that grouped
+        // everything one way would pass either half alone.
+        let env = envelope(json!([{
+            "kenteken": "X99XXX",
+            "catalogusprijs": 91144,
+            "massa_ledig_voertuig": "1880",
+        }]));
+        let dutch = plain(&env, &lookup());
+        assert!(dutch.contains("EUR 91.144"), "rendered:\n{dutch}");
+        assert!(!dutch.contains("91,144"), "rendered:\n{dutch}");
+
+        let english = render(&env, &lookup(), OutputFormat::Text, en());
+        assert!(english.contains("EUR 91,144"), "rendered:\n{english}");
+        assert!(english.contains("1,880 kg empty"), "rendered:\n{english}");
+        assert!(!english.contains("91.144"), "rendered:\n{english}");
     }
 
     #[test]
@@ -1264,65 +1433,93 @@ mod tests {
             "inrichting": "Geen verstrekking in Open Data",
         }]));
         let rendered = plain(&env, &lookup());
-        assert!(!rendered.contains("Colour"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Odometer"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Tellerstand"), "rendered:\n{rendered}");
         for placeholder in ["N.v.t.", "Niet geregistreerd", "Geen verstrekking"] {
             assert!(!rendered.contains(placeholder), "leaked {placeholder}");
         }
+        // Every field on this card is a placeholder, so the plate is all that is
+        // left to say. Filtering that renamed a placeholder rather than dropping
+        // it would satisfy the checks above and still print a line.
+        assert_eq!(rendered.trim(), "X-99-XXX", "rendered:\n{rendered}");
     }
 
     #[test]
     fn an_uninsured_vehicle_is_shouted_and_an_insured_one_is_not() {
         let uninsured = envelope(json!([{"kenteken": "X99XXX", "wam_verzekerd": "Nee"}]));
         let rendered = plain(&uninsured, &lookup());
-        assert!(rendered.contains("NOT INSURED"), "rendered:\n{rendered}");
+        assert!(rendered.contains("NIET VERZEKERD"), "rendered:\n{rendered}");
 
         let insured = envelope(json!([{"kenteken": "X99XXX", "wam_verzekerd": "Ja"}]));
         let rendered = plain(&insured, &lookup());
-        assert!(rendered.contains("Insured (WAM)"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("NOT INSURED"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("Verzekerd (WAM)   ja"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("NIET VERZEKERD"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
     fn an_open_recall_is_shouted_and_a_clear_one_reads_as_clear() {
         let open =
             envelope(json!([{"kenteken": "X99XXX", "openstaande_terugroepactie_indicator": "Ja"}]));
-        assert!(plain(&open, &lookup()).contains("OPEN RECALL"));
+        assert!(plain(&open, &lookup()).contains("OPENSTAAND"));
 
         let clear = envelope(
             json!([{"kenteken": "X99XXX", "openstaande_terugroepactie_indicator": "Nee"}]),
         );
         let rendered = plain(&clear, &lookup());
         assert!(
-            rendered.contains("none outstanding"),
+            rendered.contains("geen openstaande"),
             "rendered:\n{rendered}"
         );
-        assert!(!rendered.contains("OPEN RECALL"));
+        assert!(!rendered.contains("OPENSTAAND"));
     }
 
-    #[test]
-    fn dutch_indicator_words_do_not_reach_the_reader() {
-        // The output is in English; `Ja` and `Nee` in a value column were the
-        // one place it lapsed.
-        let env = envelope(json!([{
+    /// The three indicators RDW files as `Ja`/`Nee`, and its odometer verdict.
+    fn indicator_card() -> Value {
+        envelope(json!([{
             "kenteken": "X99XXX",
             "wam_verzekerd": "Ja",
             "openstaande_terugroepactie_indicator": "Nee",
             "tellerstandoordeel": "Logisch",
-        }]));
-        let rendered = plain(&env, &lookup());
+        }]))
+    }
+
+    #[test]
+    fn rdws_own_words_are_what_the_dutch_card_says() {
+        // Not a translation: `facts` turns RDW's `Logisch` into the token
+        // `consistent` for the JSON contract, and the Dutch card hands it back.
+        // A card that printed the token would leave English in Dutch output.
+        let rendered = plain(&indicator_card(), &lookup());
+        assert!(rendered.contains("logisch"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("consistent"), "rendered:\n{rendered}");
+        // Capitalised as RDW files it is the tell that the value was passed
+        // through untouched rather than rendered as part of a sentence.
+        assert!(!rendered.contains("Logisch"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn dutch_indicator_words_do_not_reach_an_english_card() {
+        // `Ja` and `Nee` in a value column were the one place `--lang en` lapsed.
+        let rendered = render(&indicator_card(), &lookup(), OutputFormat::Text, en());
         for dutch in ["Ja", "Nee", "Logisch"] {
             assert!(!rendered.contains(dutch), "leaked {dutch}:\n{rendered}");
         }
+        // The negative control: a card that dropped all three fields would pass
+        // the loop above without saying anything.
+        assert!(rendered.contains("consistent"), "rendered:\n{rendered}");
     }
 
     #[test]
     fn a_blocked_transfer_is_shown_and_a_normal_one_is_not() {
         let blocked = envelope(json!([{"kenteken": "X99XXX", "tenaamstellen_mogelijk": "Nee"}]));
-        assert!(plain(&blocked, &lookup()).contains("TRANSFER BLOCKED"));
+        assert!(plain(&blocked, &lookup()).contains("OVERSCHRIJVING GEBLOKKEERD"));
 
         let normal = envelope(json!([{"kenteken": "X99XXX", "tenaamstellen_mogelijk": "Ja"}]));
-        assert!(!plain(&normal, &lookup()).contains("TRANSFER BLOCKED"));
+        assert!(!plain(&normal, &lookup()).contains("OVERSCHRIJVING GEBLOKKEERD"));
     }
 
     #[test]
@@ -1388,7 +1585,10 @@ mod tests {
         }]));
         let rendered = plain(&env, &lookup());
         assert!(rendered.contains("220 kW"), "rendered:\n{rendered}");
-        assert!(rendered.contains("533 km range"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("533 km actieradius"),
+            "rendered:\n{rendered}"
+        );
     }
 
     #[test]
@@ -1448,8 +1648,14 @@ mod tests {
         let mut env = envelope(json!([]));
         env["no_rows"] = json!(["X99XXX"]);
         let rendered = plain(&env, &defects());
-        assert!(rendered.contains("registered"), "rendered: {rendered}");
-        assert!(rendered.contains("no defects"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("is geregistreerd"),
+            "rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("zonder gebreken vastgesteld bij keuring"),
+            "rendered: {rendered}"
+        );
     }
 
     #[test]
@@ -1462,7 +1668,7 @@ mod tests {
         let rendered = plain(&env, &defects());
         assert!(rendered.contains("ZZZ9"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("not in this build"),
+            rendered.contains("niet in de tabel van deze build"),
             "rendered:\n{rendered}"
         );
     }
@@ -1475,7 +1681,7 @@ mod tests {
         ]));
         let rendered = plain(&one, &defects());
         assert!(
-            !rendered.contains("PLATE"),
+            !rendered.contains("KENTEKEN"),
             "a repeated plate column is noise:\n{rendered}"
         );
         assert!(!rendered.contains("X-99-XXX"), "rendered:\n{rendered}");
@@ -1485,7 +1691,7 @@ mod tests {
             {"kenteken": "AA11BB", "gebrek_identificatie": "AC5"},
         ]));
         let rendered = plain(&two, &defects());
-        assert!(rendered.contains("PLATE"), "rendered:\n{rendered}");
+        assert!(rendered.contains("KENTEKEN"), "rendered:\n{rendered}");
         assert!(rendered.contains("X-99-XXX"), "rendered:\n{rendered}");
         assert!(rendered.contains("AA-11-BB"), "rendered:\n{rendered}");
     }
@@ -1512,7 +1718,7 @@ mod tests {
             &env,
             &Command::Fuel { plates: vec![] },
             OutputFormat::Text,
-            Style::Plain,
+            nl(),
         );
         let ends: Vec<usize> = rendered
             .lines()
@@ -1641,8 +1847,8 @@ mod tests {
             "truncated": false, "not_found": [], "no_rows": [],
         });
         let rendered = plain(&env, &Command::Datasets);
-        assert!(rendered.starts_with("NAME"), "rendered:\n{rendered}");
-        assert!(rendered.contains("BY PLATE"), "rendered:\n{rendered}");
+        assert!(rendered.starts_with("NAAM"), "rendered:\n{rendered}");
+        assert!(rendered.contains("OP KENTEKEN"), "rendered:\n{rendered}");
         assert!(
             !rendered.contains("order"),
             "the SoQL ordering is a machine detail:\n{rendered}"
@@ -1713,7 +1919,7 @@ mod tests {
             "https://example.com/recall",
             "0800-1234567",
             "2023-04-17",
-            "1,834 vehicles in the action",
+            "1.834 voertuigen in de actie",
         ] {
             assert!(
                 collapsed(&rendered).contains(expected),
@@ -1728,7 +1934,7 @@ mod tests {
         repaired["code_status"] = json!("P");
         repaired["status"] = json!("Hersteld");
         let rendered = plain(&recall_envelope(json!([repaired.clone()])), &recalls());
-        assert!(rendered.contains("repaired"), "rendered:\n{rendered}");
+        assert!(rendered.contains("hersteld"), "rendered:\n{rendered}");
         assert!(!rendered.contains("OPEN"), "rendered:\n{rendered}");
 
         // RDW filed the recall against the vehicle and left the status column
@@ -1737,10 +1943,10 @@ mod tests {
         silent.as_object_mut().unwrap().remove("code_status");
         let rendered = plain(&recall_envelope(json!([silent])), &recalls());
         assert!(
-            rendered.contains("status not reported"),
+            rendered.contains("status niet gemeld"),
             "rendered:\n{rendered}"
         );
-        assert!(!rendered.contains("repaired"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("hersteld"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -1755,14 +1961,19 @@ mod tests {
         let rendered = plain(&env, &recalls());
         assert!(rendered.contains("MGP230085"), "rendered:\n{rendered}");
         assert!(rendered.contains("OPEN"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Defect"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Repair"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Gebrek"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Herstel"), "rendered:\n{rendered}");
     }
 
     #[test]
     fn the_hazard_of_an_open_recall_is_shouted_in_colour_and_in_plain() {
         let env = recall_envelope(json!([open_recall_row()]));
-        let coloured = render(&env, &recalls(), OutputFormat::Text, Style::Colour);
+        let coloured = render(
+            &env,
+            &recalls(),
+            OutputFormat::Text,
+            Voice::new(Style::Colour, Lang::Nl),
+        );
         assert!(coloured.contains("OPEN"), "colour dropped the status");
         assert!(
             coloured.contains("Verminderde remwerking"),
@@ -1819,8 +2030,8 @@ mod tests {
     #[test]
     fn a_tachograph_finding_is_shouted_and_a_routine_check_is_left_alone() {
         for (dutch, shouted) in [
-            ("manipulatie tacho", "TACHOGRAPH TAMPERING"),
-            ("zegelverbreking tacho", "TACHOGRAPH SEAL BROKEN"),
+            ("manipulatie tacho", "TACHOGRAAF GEMANIPULEERD"),
+            ("zegelverbreking tacho", "TACHOGRAAFZEGEL VERBROKEN"),
         ] {
             let env = inspection_envelope(json!([
                 {
@@ -1850,7 +2061,7 @@ mod tests {
                 routine.contains("periodieke controle"),
                 "routine row: {routine:?}"
             );
-            assert!(!routine.contains("TACHOGRAPH"), "routine row: {routine:?}");
+            assert!(!routine.contains("TACHOGRAAF"), "routine row: {routine:?}");
             assert!(routine.contains("2026-03-04"), "routine row: {routine:?}");
         }
     }
@@ -1878,7 +2089,7 @@ mod tests {
         ]));
         let rendered = plain(&env, &inspections());
         let header = rendered.lines().next().expect("the table has a header");
-        assert!(header.contains("VALID UNTIL"), "header: {header:?}");
+        assert!(header.contains("GELDIG TOT"), "header: {header:?}");
         assert!(!header.contains("APK"), "header: {header:?}");
         let tacho = rendered
             .lines()
@@ -1907,12 +2118,17 @@ mod tests {
                 "vervaldatum_keuring": "20260304",
             },
         ]));
-        let rendered = render(&env, &inspections(), OutputFormat::Text, Style::Colour);
+        let rendered = render(
+            &env,
+            &inspections(),
+            OutputFormat::Text,
+            Voice::new(Style::Colour, Lang::Nl),
+        );
         let visible = stripped(&rendered);
         let columns: Vec<usize> = visible
             .lines()
             .map(|line| {
-                line.find("FILED BY")
+                line.find("GEMELD DOOR")
                     .or_else(|| line.find("Tachograafwerkplaats"))
                     .or_else(|| line.find("APK lichte"))
                     .unwrap_or_else(|| panic!("no accreditation cell in {line:?}"))
@@ -1930,15 +2146,18 @@ mod tests {
         let mut env = recall_envelope(json!([]));
         env["no_rows"] = json!(["X-99-XXX"]);
         let rendered = plain(&env, &recalls());
-        assert!(rendered.contains("registered"), "rendered: {rendered}");
         assert!(
-            rendered.contains("no recalls on record, open or repaired"),
+            rendered.contains("is geregistreerd"),
+            "rendered: {rendered}"
+        );
+        assert!(
+            rendered.contains("zonder terugroepacties, open of hersteld"),
             "rendered: {rendered}"
         );
 
         let rendered = plain(&env, &inspections());
         assert!(
-            rendered.contains("no notifications from inspection bodies"),
+            rendered.contains("zonder meldingen van keuringsinstanties"),
             "rendered: {rendered}"
         );
     }
@@ -1952,7 +2171,7 @@ mod tests {
         }]));
         let rendered = plain(&same, &lookup());
         assert!(
-            !rendered.contains("Dutch register"),
+            !rendered.contains("Eerste tenaamstelling NL"),
             "a line saying the two dates are the same is noise:\n{rendered}"
         );
 
@@ -1964,7 +2183,7 @@ mod tests {
         let rendered = plain(&later, &lookup());
         assert!(rendered.contains("2022-06-15"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("after first admission"),
+            rendered.contains("na eerste toelating"),
             "rendered:\n{rendered}"
         );
         // The gap is a fact about two dates. Calling it an import would be a
@@ -1980,7 +2199,7 @@ mod tests {
             "code_toelichting_tellerstandoordeel": "04",
         }]));
         let rendered = plain(&flagged, &lookup());
-        assert!(rendered.contains("INCONSISTENT"), "rendered:\n{rendered}");
+        assert!(rendered.contains("ONLOGISCH"), "rendered:\n{rendered}");
         assert!(
             rendered.contains("teruggedraaid"),
             "the reason is the interesting part:\n{rendered}"
@@ -1994,7 +2213,7 @@ mod tests {
             "code_toelichting_tellerstandoordeel": "00",
         }]));
         let rendered = plain(&clean, &lookup());
-        assert!(rendered.contains("consistent"), "rendered:\n{rendered}");
+        assert!(rendered.contains("logisch"), "rendered:\n{rendered}");
         assert!(!rendered.contains("verklaarbaar"), "rendered:\n{rendered}");
     }
 
@@ -2007,7 +2226,7 @@ mod tests {
             "hoogte_voertuig": "0",
         }]));
         let rendered = plain(&unmeasured, &lookup());
-        assert!(!rendered.contains("Dimensions"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Afmetingen"), "rendered:\n{rendered}");
         assert!(!rendered.contains("0 cm"), "rendered:\n{rendered}");
 
         // The negative control: a card that never printed dimensions at all
@@ -2020,7 +2239,7 @@ mod tests {
         }]));
         let rendered = plain(&measured, &lookup());
         assert!(
-            rendered.contains("645 cm long, 255 cm wide, 400 cm high"),
+            rendered.contains("645 cm lang, 255 cm breed, 400 cm hoog"),
             "rendered:\n{rendered}"
         );
 
@@ -2028,9 +2247,9 @@ mod tests {
         // padding the other two out to keep a positional `l x w x h` shape.
         let partial = envelope(json!([{"kenteken": "X99XXX", "hoogte_voertuig": "400"}]));
         let rendered = plain(&partial, &lookup());
-        assert!(rendered.contains("400 cm high"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("long"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("wide"), "rendered:\n{rendered}");
+        assert!(rendered.contains("400 cm hoog"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("lang"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("breed"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -2044,20 +2263,20 @@ mod tests {
         }]));
         let rendered = plain(&env, &lookup());
         assert!(
-            rendered.contains("consistent   last reading 2016"),
+            rendered.contains("logisch   laatste stand 2016"),
             "rendered:\n{rendered}"
         );
-        // A year is a date, not a quantity. Grouped as `2,016` it reads as a
+        // A year is a date, not a quantity. Grouped as `2.016` it reads as a
         // distance, and every other number on this card is one.
-        assert!(!rendered.contains("2,016"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("2.016"), "rendered:\n{rendered}");
 
         // RDW records each half without the other, and either alone is worth
         // saying: 730,494 vehicles have a reading year and no verdict.
         let verdict_only =
             envelope(json!([{"kenteken": "X99XXX", "tellerstandoordeel": "Logisch"}]));
         let rendered = plain(&verdict_only, &lookup());
-        assert!(rendered.contains("consistent"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("last reading"), "rendered:\n{rendered}");
+        assert!(rendered.contains("logisch"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("laatste stand"), "rendered:\n{rendered}");
 
         let year_only = envelope(json!([{
             "kenteken": "X99XXX",
@@ -2065,10 +2284,10 @@ mod tests {
         }]));
         let rendered = plain(&year_only, &lookup());
         assert!(
-            rendered.contains("Odometer") && rendered.contains("last reading 2016"),
+            rendered.contains("Tellerstand") && rendered.contains("laatste stand 2016"),
             "rendered:\n{rendered}"
         );
-        assert!(!rendered.contains("consistent"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("logisch"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -2084,17 +2303,17 @@ mod tests {
         let rendered = plain(&env, &lookup());
         let apk = rendered
             .lines()
-            .find(|l| l.contains("APK expires"))
+            .find(|l| l.contains("APK verloopt"))
             .expect("the APK line is rendered");
         assert!(apk.contains("2026-11-09"), "APK line: {apk:?}");
-        assert!(!apk.contains("EXPIRED"), "APK line: {apk:?}");
+        assert!(!apk.contains("VERLOPEN"), "APK line: {apk:?}");
 
         let tacho = rendered
             .lines()
-            .find(|l| l.contains("Tachograph expires"))
+            .find(|l| l.contains("Tachograaf verloopt"))
             .expect("the tachograph line is rendered");
         assert!(tacho.contains("2026-03-01"), "tachograph line: {tacho:?}");
-        assert!(tacho.contains("EXPIRED"), "tachograph line: {tacho:?}");
+        assert!(tacho.contains("VERLOPEN"), "tachograph line: {tacho:?}");
     }
 
     #[test]
@@ -2103,8 +2322,8 @@ mod tests {
         // one of them is noise, and one reading a date would be a lie.
         let env = envelope(json!([{"kenteken": "X99XXX", "vervaldatum_apk": "20261109"}]));
         let rendered = plain(&env, &lookup());
-        assert!(rendered.contains("APK expires"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("Tachograph"), "rendered:\n{rendered}");
+        assert!(rendered.contains("APK verloopt"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Tachograaf"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -2119,7 +2338,7 @@ mod tests {
         }]));
         let rendered = plain(&car, &lookup());
         assert!(
-            rendered.contains("Personenauto (M1), stationwagen, 5 seats, 4 doors"),
+            rendered.contains("Personenauto (M1), stationwagen, 5 zitplaatsen, 4 deuren"),
             "rendered:\n{rendered}"
         );
 
@@ -2132,15 +2351,15 @@ mod tests {
         }]));
         let rendered = plain(&trailer, &lookup());
         assert!(
-            rendered.contains("Aanhangwagen, 0 doors"),
+            rendered.contains("Aanhangwagen, 0 deuren"),
             "rendered:\n{rendered}"
         );
 
-        // One of a thing is one, not "1 seats".
+        // One of a thing is one, not "1 zitplaatsen".
         let single = envelope(json!([{"kenteken": "X99XXX", "aantal_zitplaatsen": "1"}]));
         let rendered = plain(&single, &lookup());
-        assert!(rendered.contains("1 seat"), "rendered:\n{rendered}");
-        assert!(!rendered.contains("1 seats"), "rendered:\n{rendered}");
+        assert!(rendered.contains("1 zitplaats"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("1 zitplaatsen"), "rendered:\n{rendered}");
     }
 
     #[test]
@@ -2152,14 +2371,14 @@ mod tests {
         }]));
         let rendered = plain(&env, &lookup());
         assert!(
-            rendered.contains("3,500 kg braked, 750 kg unbraked"),
+            rendered.contains("3.500 kg geremd, 750 kg ongeremd"),
             "rendered:\n{rendered}"
         );
 
         // A vehicle that may not tow has neither figure, so no line here has to
         // stand for "not permitted".
         let none = envelope(json!([{"kenteken": "X99XXX"}]));
-        assert!(!plain(&none, &lookup()).contains("Towing"));
+        assert!(!plain(&none, &lookup()).contains("Trekgewicht"));
     }
 
     #[test]
@@ -2171,8 +2390,8 @@ mod tests {
             "plaats_chassisnummer": "r. tegen schutbord onder motorkap",
         }]));
         let rendered = plain(&env, &lookup());
-        assert!(rendered.contains("2,998 cm3"), "rendered:\n{rendered}");
-        assert!(rendered.contains("Energy label"), "rendered:\n{rendered}");
+        assert!(rendered.contains("2.998 cm3"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Energielabel"), "rendered:\n{rendered}");
         // RDW's own abbreviated Dutch. Someone is standing at the vehicle with
         // this on screen, and expanding it would be the tool guessing where a
         // stamped number is.
@@ -2185,7 +2404,7 @@ mod tests {
         // RDW gave nothing for.
         let bare = envelope(json!([{"kenteken": "X99XXX"}]));
         let rendered = plain(&bare, &lookup());
-        for label in ["Engine", "Energy label", "VIN location"] {
+        for label in ["Cilinderinhoud", "Energielabel", "Positie VIN"] {
             assert!(!rendered.contains(label), "{label} on an empty card");
         }
     }
@@ -2202,18 +2421,18 @@ mod tests {
         let rendered = plain(&env, &lookup());
         let status = rendered
             .lines()
-            .find(|l| l.contains("OPEN RECALL"))
+            .find(|l| l.contains("OPENSTAAND"))
             .expect("the recall line is rendered");
         // The pointer stays on the shouted line, spacing and all. A hazard
         // joined on here would push the line past the card, and wrapping it
         // would collapse that spacing into one run-on phrase.
         assert!(
-            status.contains("OPEN RECALL   see: kenteken recalls X-99-XXX"),
+            status.contains("OPENSTAAND   zie: kenteken recalls X-99-XXX"),
             "recall line was {status:?}"
         );
         let hazard = rendered
             .lines()
-            .find(|l| l.contains("Recall hazard"))
+            .find(|l| l.contains("Risico terugroepactie"))
             .expect("the hazard has a line of its own");
         assert!(
             hazard.contains("Verminderde remwerking"),

@@ -12,6 +12,7 @@ use std::time::Duration;
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use kenteken::output::Style;
+use kenteken::text::Lang;
 use kenteken::{
     Command as Op, HttpSource, KentekenError, OutputFormat, Plate, Request, rdw, run, schema,
 };
@@ -44,6 +45,10 @@ struct Cli {
     /// Output format; auto = text on a TTY, JSON when piped.
     #[arg(long, short = 'o', value_enum, default_value = "auto", global = true)]
     output: CliOutput,
+
+    /// Language for text output. JSON, YAML and ndjson are English in both.
+    #[arg(long, value_enum, default_value = "nl", global = true)]
+    lang: CliLang,
 
     /// Suppress warnings on stderr. Errors and ndjson metadata still print.
     #[arg(long, short = 'q', global = true)]
@@ -146,6 +151,26 @@ impl CliOutput {
     }
 }
 
+/// Which language the card speaks.
+///
+/// Dutch by default: the register is Dutch, the values RDW returns are Dutch,
+/// and so is the document the card stands in for. English is there because the
+/// vocabulary exists and still reads well, not because the data is neutral.
+#[derive(Clone, Copy, ValueEnum)]
+enum CliLang {
+    Nl,
+    En,
+}
+
+impl CliLang {
+    fn resolve(self) -> Lang {
+        match self {
+            CliLang::Nl => Lang::Nl,
+            CliLang::En => Lang::En,
+        }
+    }
+}
+
 /// Whether to colour the output, from the environment alone.
 ///
 /// Split from the environment lookups so the decision itself is testable.
@@ -244,6 +269,7 @@ fn dispatch(cli: &Cli) -> Result<ExitCode, KentekenError> {
         command: op,
         format: cli.output.resolve(),
         style: style(),
+        lang: cli.lang.resolve(),
         limit: cli.limit,
         offset: cli.offset,
         fields: cli.fields.clone(),
