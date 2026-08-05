@@ -156,6 +156,27 @@ pub fn measure(value: f64) -> String {
     format!("{value}")
 }
 
+/// Words RDW shouts that are spelled in capitals rather than shouted, so calming
+/// them is the error and not the fix.
+///
+/// Nothing in the shape of a word separates these from a shouted one. `WIT` is
+/// 1,642,433 colour rows and `BMW` is 632,104 make rows; they are three capital
+/// letters each, and only a vocabulary tells them apart. So this is a list, and
+/// every entry was picked out of the register by row count rather than from
+/// memory.
+///
+/// It is complete for RDW's two closed vocabularies: `inrichting` has 95 distinct
+/// values holding exactly one initialism, `MPV`, and `eerste_kleur` has 16
+/// holding none. It cannot be complete for the open ones, where RDW carries
+/// 11,422 makes and 268,884 model names. An initialism that is not listed stays
+/// calmed, which is the pre-existing behaviour rather than a new fault, and the
+/// entry is added when one is met.
+const INITIALISMS: &[&str] = &[
+    "AGM", "AMG", "ASX", "BMW", "BSA", "BTC", "BYD", "CDI", "CLA", "DAF", "DS", "FH", "GLC", "GS",
+    "GTS", "IH", "JCB", "KTM", "LMC", "MAN", "MG", "MPV", "SE", "SEAT", "ST", "SYM", "TGB", "VDL",
+    "VGM", "VW", "XF",
+];
+
 /// Title-case one of RDW's shouted enumerations: `ZWART` becomes `Zwart`.
 ///
 /// Only applied to display. The raw column and the `derived` block both keep
@@ -163,18 +184,26 @@ pub fn measure(value: f64) -> String {
 pub fn title_case(value: &str) -> String {
     value
         .split(' ')
-        .map(|word| {
-            if word.chars().any(|c| c.is_lowercase()) {
-                return word.to_string();
-            }
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_string() + &chars.as_str().to_lowercase(),
-                None => String::new(),
-            }
-        })
+        .map(|word| word.split('-').map(calm).collect::<Vec<_>>().join("-"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Calm one word, where a hyphen starts a new one.
+///
+/// `MERCEDES-BENZ` is 716,464 rows and reads as `Mercedes-benz` if the hyphen is
+/// treated as an ordinary character, which is the most common premium make on
+/// the register rendered as a typo. Each part is calmed on its own instead, so
+/// the make is `Mercedes-Benz` and `MERCEDES-AMG` keeps its initialism.
+fn calm(word: &str) -> String {
+    if word.chars().any(|c| c.is_lowercase()) || INITIALISMS.contains(&word) {
+        return word.to_string();
+    }
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_string() + &chars.as_str().to_lowercase(),
+        None => String::new(),
+    }
 }
 
 /// The plate in its readable grouped form, e.g. `X-99-XXX`.
@@ -604,6 +633,31 @@ mod tests {
         assert_eq!(title_case("LICHT BLAUW"), "Licht Blauw");
         assert_eq!(title_case("hatchback"), "hatchback");
         assert_eq!(title_case("MODEL Y"), "Model Y");
+    }
+
+    #[test]
+    fn an_initialism_keeps_its_capitals_and_a_shouted_word_of_the_same_shape_does_not() {
+        // The pair that rules out every shape-based rule: three capitals each,
+        // and opposite answers. Only the vocabulary separates them.
+        assert_eq!(title_case("BMW"), "BMW");
+        assert_eq!(title_case("WIT"), "Wit");
+
+        assert_eq!(title_case("MPV"), "MPV");
+        assert_eq!(title_case("DAF"), "DAF");
+        // Not listed, and so still calmed. Stated here because it is the
+        // behaviour a reader will meet, not an oversight.
+        assert_eq!(title_case("KIA"), "Kia");
+    }
+
+    #[test]
+    fn a_hyphen_starts_a_new_word_rather_than_continuing_the_old_one() {
+        assert_eq!(title_case("MERCEDES-BENZ"), "Mercedes-Benz");
+        assert_eq!(title_case("HARLEY-DAVIDSON"), "Harley-Davidson");
+        assert_eq!(title_case("DEUTZ-FAHR"), "Deutz-Fahr");
+        // An initialism is recognised inside a hyphenated word too.
+        assert_eq!(title_case("MERCEDES-AMG"), "Mercedes-AMG");
+        // A word with no hyphen is unaffected by the splitting.
+        assert_eq!(title_case("VOLKSWAGEN"), "Volkswagen");
     }
 
     #[test]

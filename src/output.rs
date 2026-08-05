@@ -1294,6 +1294,25 @@ mod tests {
     }
 
     #[test]
+    fn the_card_keeps_an_initialism_capitalised_and_a_hyphenated_make_whole() {
+        let env = envelope(json!([{
+            "kenteken": "XXX99X",
+            "merk": "MERCEDES-BENZ",
+            "handelsbenaming": "B-KLASSE",
+            "inrichting": "MPV",
+            "eerste_kleur": "WIT",
+        }]));
+        let rendered = plain(&env, &lookup());
+        assert!(rendered.contains("Mercedes-Benz B-Klasse"), "{rendered}");
+        assert!(rendered.contains("MPV"), "{rendered}");
+        // The same three-capital shape as MPV, on the same card, calmed. Both
+        // bounds are needed: either one alone passes on a broken rendering.
+        assert!(rendered.contains("Wit"), "{rendered}");
+        assert!(!rendered.contains("Mercedes-benz"), "{rendered}");
+        assert!(!rendered.contains("Mpv"), "{rendered}");
+    }
+
+    #[test]
     fn an_electric_vehicle_reports_power_and_range() {
         // An EV leaves `nettomaximumvermogen` empty, so reading only that column
         // rendered a Tesla with no power figure at all.

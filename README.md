@@ -295,6 +295,22 @@ ISO 8601 rather than `20261231`, `Ja`/`Nee` are booleans, `Logisch` is
 `consistent`, and a CO2 figure never appears without the test cycle that
 produced it, because a WLTP number and an NEDC number are not comparable.
 
+RDW writes makes, models, bodies and colours in capitals. The card calms them to
+be read, `ZWART` to `Zwart`, while `derived` and the raw columns keep RDW's own
+spelling so a consumer can still match it against RDW's documentation. Calming
+is the wrong answer for a word that is written in capitals rather than shouted,
+and no rule tells the two apart: `WIT` and `BMW` are three capital letters each.
+So the exceptions are a list. It is complete for RDW's closed vocabularies, the
+95 body styles holding exactly one initialism (`MPV`) and the 16 colours holding
+none, and it is necessarily partial for 11,422 makes and 268,884 model names. An
+initialism nobody has listed yet is still calmed.
+
+```
+99-XX-99   Mercedes-Benz 208 CDI
+  Type               Personenauto (M1), MPV, 9 seats
+  Colour             Wit
+```
+
 `apk_expired` is `null` rather than `false` when there is no expiry date: a
 vehicle that needs no inspection has not passed one.
 
