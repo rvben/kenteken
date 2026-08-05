@@ -7,13 +7,13 @@
 //! # RDW's placeholders
 //!
 //! RDW does not leave a column out when it has nothing to record. It writes a
-//! sentence in it: `N.v.t.`, `Niet geregistreerd`, or `Geen verstrekking in Open
-//! Data`. Those are absences wearing the clothes of a value, and they are common
-//! rather than exotic: `Niet geregistreerd` is the single most frequent value of
-//! `tweede_kleur` (10.6M of 17M rows), so passing it through renders a one-tone
-//! car as two-tone, and `wacht_op_keuren` is `Geen verstrekking in Open Data` in
-//! every row of the register. [`text`] treats all three as absent, which is what
-//! RDW means by them.
+//! sentence in it: `N.v.t.`, `Niet geregistreerd`, `Geen verstrekking in Open
+//! Data`, `Niet bekend` or `(Nog) niet bekend`. Those are absences wearing the
+//! clothes of a value, and they are common rather than exotic: `Niet
+//! geregistreerd` is the single most frequent value of `tweede_kleur` (10.6M of
+//! 17M rows), so passing it through renders a one-tone car as two-tone, and
+//! `wacht_op_keuren` is `Geen verstrekking in Open Data` in every row of the
+//! register. [`text`] treats them all as absent, which is what RDW means by them.
 //!
 //! The raw columns still carry the sentinels verbatim in JSON output, because
 //! `raw` promises rows exactly as RDW returned them. `derived` is the sentinel
@@ -27,15 +27,24 @@ use serde_json::{Value, json};
 ///
 /// Each was confirmed against the live register by counting how often it occurs,
 /// which is also how their weight became clear: `Niet geregistreerd` is the most
-/// frequent value of `tweede_kleur` in the entire dataset. Compared
-/// case-insensitively after trimming, since spelling varies between datasets.
+/// frequent value of `tweede_kleur` in the entire dataset, and the last two are
+/// what the recall register writes where a manufacturer's website or telephone
+/// number belongs. They are the majority of everything that column holds:
+/// `(Nog) niet bekend` 1,641 rows and `Niet bekend` 656, against 2,409 rows that
+/// leave it out and a long tail of real URLs, the largest of which has 73. Both
+/// occur in the telephone column too. Compared case-insensitively after
+/// trimming, since spelling varies between datasets.
 ///
 /// Deliberately short. A word that merely sounds like an absence, such as
-/// `Onbekend`, is a value RDW chose to record and is passed through.
+/// `Onbekend`, is a value RDW chose to record and is passed through. Adding
+/// these two costs the vehicle register exactly one row, out of 16.8M, whose
+/// make, model or body reads `Niet bekend`.
 pub const SENTINELS: &[&str] = &[
     "n.v.t.",
     "niet geregistreerd",
     "geen verstrekking in open data",
+    "niet bekend",
+    "(nog) niet bekend",
 ];
 
 /// Read a column as text, or `None` when RDW recorded nothing for it.
@@ -176,7 +185,19 @@ pub fn vehicle(item: &Value, today: Option<Date>) -> Value {
         _ => None,
     };
     let admitted = date(item, "datum_eerste_toelating");
+    let dutch = date(item, "datum_eerste_tenaamstelling_in_nederland");
     let fuels = fuel_rows(item);
+    let open_recall = flag(item, "openstaande_terugroepactie_indicator");
+    let open_recalls = open_recall_rows(item);
+    // How many open recalls this run actually resolved. `None` means the count
+    // is unknown, never that there are none: the register saying a recall is
+    // open while no recall row came back is a gap in the answer, not a zero.
+    let open_recall_count = match (open_recall, open_recalls.len()) {
+        (Some(false), _) => Some(0),
+        (Some(true), 0) => None,
+        (Some(true), n) => Some(n as i64),
+        (None, _) => None,
+    };
 
     json!({
         "plate": plate(item),
@@ -196,6 +217,11 @@ pub fn vehicle(item: &Value, today: Option<Date>) -> Value {
             _ => None,
         },
         "registered_since": date(item, "datum_tenaamstelling").map(|d| d.iso()),
+        "first_dutch_registration": dutch.map(|d| d.iso()),
+        "dutch_registration_lag_days": match (admitted, dutch) {
+            (Some(admitted), Some(dutch)) => Some(admitted.days_until(&dutch)),
+            _ => None,
+        },
         "fuels": fuels.iter().filter_map(|r| text(r, "brandstof_omschrijving")).collect::<Vec<_>>(),
         "power_kw": fuels.iter().filter_map(power_kw).next(),
         "co2_g_per_km": fuels.iter().filter_map(|r| co2(r).map(|(v, _)| v)).next(),
@@ -205,12 +231,113 @@ pub fn vehicle(item: &Value, today: Option<Date>) -> Value {
         "mass_max_kg": integer(item, "toegestane_maximum_massa_voertuig"),
         "catalogue_price_eur": integer(item, "catalogusprijs"),
         "odometer": odometer_judgement(item),
+        "odometer_reason": odometer_reason(item),
         "insured": flag(item, "wam_verzekerd"),
-        "open_recall": flag(item, "openstaande_terugroepactie_indicator"),
+        "open_recall": open_recall,
+        "open_recall_count": open_recall_count,
+        // Only meaningful alongside a known count. An empty list next to an
+        // unknown count would read as "no hazards" when nothing was resolved.
+        "open_recall_hazards": open_recall_count.map(|_| hazards(&open_recalls)),
         "exported": flag(item, "export_indicator"),
         "taxi": flag(item, "taxi_indicator"),
         "transferable": flag(item, "tenaamstellen_mogelijk"),
     })
+}
+
+/// The `derived` block for one recall.
+///
+/// The item is a status row from RDW's recall register with the two
+/// reference-keyed datasets joined onto it: `recall` holds the defect and the
+/// repair, `risks` the hazards. Either can be absent, because a status row is
+/// allowed to name a reference RDW published no detail for; the keys are still
+/// present, as `null` and `[]`.
+pub fn recall(item: &Value) -> Value {
+    let detail = item.get("recall").cloned().unwrap_or(Value::Null);
+    json!({
+        "plate": plate(item),
+        "reference": text(item, "referentiecode_rdw"),
+        "open": item.as_object().and_then(crate::recall::is_open),
+        "status": text(item, "status"),
+        "defect": text(&detail, "omschrijving_defect"),
+        "category": text(&detail, "categorie_defect"),
+        "consequences": text(&detail, "materi_le_gevolgen"),
+        "hazards": hazards(std::iter::once(item)),
+        "repair": text(&detail, "beschrijving_van_het_herstel"),
+        "manufacturer": text(&detail, "meldende_producent_distributeur"),
+        "more_info_url": text(&detail, "meer_informatie_op_internet"),
+        "more_info_phone": text(&detail, "meer_informatie_via_telefoonnummer"),
+        "published": date(&detail, "publicatiedatum_rdw").map(|d| d.iso()),
+        "owners_informed": date(&detail, "datum_eigenaren_ge_nformeerd").map(|d| d.iso()),
+        "vehicles_affected": integer(&detail, "totaal_aantal_voertuigen_terugroepactie"),
+    })
+}
+
+/// The `derived` block for one notification from an inspection body.
+pub fn inspection(row: &Value) -> Value {
+    let kind = text(row, "soort_melding_ki_omschrijving");
+    json!({
+        "plate": plate(row),
+        "date": date(row, "meld_datum_door_keuringsinstantie").map(|d| d.iso()),
+        "kind": kind,
+        "accreditation": text(row, "soort_erkenning_omschrijving"),
+        "expiry": date(row, "vervaldatum_keuring").map(|d| d.iso()),
+        "alarm": kind.as_deref().and_then(inspection_alarm),
+    })
+}
+
+/// A notification that is a finding against the vehicle rather than a routine
+/// event, as a stable machine value.
+///
+/// Inspection bodies file five kinds of notification, counted across the whole
+/// dataset: `periodieke controle` (24.7M), `inbouw` (115k), `manipulatie tacho`
+/// (55.7k), `uitbouw` (3.0k) and `zegelverbreking tacho` (2.7k). The last two
+/// named are tachograph findings, which is to say someone interfered with the
+/// instrument recording a professional driver's hours. They are singled out here
+/// so both output formats can shout them the way they shout an expired APK.
+fn inspection_alarm(kind: &str) -> Option<&'static str> {
+    match kind.trim().to_lowercase().as_str() {
+        "manipulatie tacho" => Some("tachograph_tampering"),
+        "zegelverbreking tacho" => Some("tachograph_seal_broken"),
+        _ => None,
+    }
+}
+
+/// The open recalls `lookup` attaches to a vehicle, if it resolved any.
+fn open_recall_rows(item: &Value) -> Vec<Value> {
+    item.get("recalls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The hazards named across some recalls, in the order met and without repeats.
+///
+/// RDW files one row per hazard, so a single recall routinely names several, and
+/// two recalls on one vehicle often name the same one twice.
+fn hazards<'a>(recalls: impl IntoIterator<Item = &'a Value>) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for recall in recalls {
+        let Some(risks) = recall.get("risks").and_then(Value::as_array) else {
+            continue;
+        };
+        for risk in risks {
+            let Some(hazard) = text(risk, "mogelijk_gevaar") else {
+                continue;
+            };
+            if !found.contains(&hazard) {
+                found.push(hazard);
+            }
+        }
+    }
+    found
+}
+
+/// RDW's own explanation of why an odometer was judged as it was.
+///
+/// Resolved from the table embedded in the binary, so it costs no request. A
+/// code this build does not know is `None` rather than a guess.
+fn odometer_reason(item: &Value) -> Option<&'static str> {
+    crate::tellerstand::explain(&text(item, "code_toelichting_tellerstandoordeel")?)
 }
 
 /// The `derived` block for one defect row.
@@ -325,11 +452,51 @@ mod tests {
     #[test]
     fn a_real_value_is_not_mistaken_for_a_placeholder() {
         // The negative control: without it, a filter that dropped everything
-        // would pass the test above.
-        for real in ["ZWART", "Zwart", "GRIJS", "hatchback", "Logisch"] {
+        // would pass the test above. `Onbekend` merely sounds like an absence;
+        // it is a value RDW chose to record, and it is passed through.
+        for real in [
+            "ZWART",
+            "Zwart",
+            "GRIJS",
+            "hatchback",
+            "Logisch",
+            "Onbekend",
+        ] {
             let r = row(json!({ "eerste_kleur": real }));
             assert_eq!(text(&r, "eerste_kleur"), Some(real.to_string()));
         }
+    }
+
+    #[test]
+    fn a_recall_with_no_contact_details_reports_none_rather_than_dutch_prose() {
+        // What RDW writes where a manufacturer's website belongs. Counted in the
+        // recall register: `(Nog) niet bekend` 1,641 rows and `Niet bekend` 656,
+        // against a largest real URL of 73. Passing them through put a line
+        // reading "More information   (Nog) niet bekend" on the card, which is
+        // an absence dressed as an answer, in the wrong language.
+        for placeholder in ["(Nog) niet bekend", "Niet bekend", "niet bekend"] {
+            let r = recall(&row(json!({
+                "kenteken": "9XXXX9",
+                "referentiecode_rdw": "MGP070060",
+                "recall": {
+                    "meer_informatie_op_internet": placeholder,
+                    "meer_informatie_via_telefoonnummer": placeholder,
+                },
+            })));
+            assert_eq!(r["more_info_url"], Value::Null, "{placeholder:?}");
+            assert_eq!(r["more_info_phone"], Value::Null, "{placeholder:?}");
+        }
+
+        // The negative control: a real contact still arrives.
+        let r = recall(&row(json!({
+            "kenteken": "9XXXX9",
+            "recall": {
+                "meer_informatie_op_internet": "www.toyota.nl/klantenservice",
+                "meer_informatie_via_telefoonnummer": "0162-585217",
+            },
+        })));
+        assert_eq!(r["more_info_url"], "www.toyota.nl/klantenservice");
+        assert_eq!(r["more_info_phone"], "0162-585217");
     }
 
     #[test]
@@ -532,5 +699,229 @@ mod tests {
         assert_eq!(d["inspection_date"], "2025-10-10");
         assert_eq!(d["code"], "AC4");
         assert_eq!(d["description"], Value::Null);
+    }
+
+    /// A vehicle row with the given indicator and however many recalls resolved.
+    fn with_recalls(indicator: Value, recalls: Value) -> Value {
+        row(json!({
+            "kenteken": "X99XXX",
+            "openstaande_terugroepactie_indicator": indicator,
+            "recalls": recalls,
+        }))
+    }
+
+    #[test]
+    fn an_open_recall_nothing_resolved_leaves_the_count_unknown_not_zero() {
+        // The register saying a recall is open while no recall row came back is
+        // a gap in this run's answer. Reporting it as zero would tell an owner
+        // their car is clear on the strength of a failed join.
+        let unresolved = vehicle(&with_recalls(json!("Ja"), json!([])), None);
+        assert_eq!(unresolved["open_recall"], json!(true));
+        assert_eq!(unresolved["open_recall_count"], Value::Null);
+        // An empty hazard list beside an unknown count would read as "nothing
+        // dangerous", which is the same lie one key over.
+        assert_eq!(unresolved["open_recall_hazards"], Value::Null);
+
+        // The negative control: a clear register really is a zero, and a rule
+        // that never reported one would pass the assertions above.
+        let clear = vehicle(&with_recalls(json!("Nee"), json!([])), None);
+        assert_eq!(clear["open_recall_count"], json!(0));
+        assert_eq!(clear["open_recall_hazards"], json!([]));
+
+        // And an unreported indicator is unknown at every key.
+        let silent = vehicle(&row(json!({"kenteken": "X99XXX"})), None);
+        assert_eq!(silent["open_recall"], Value::Null);
+        assert_eq!(silent["open_recall_count"], Value::Null);
+        assert_eq!(silent["open_recall_hazards"], Value::Null);
+    }
+
+    #[test]
+    fn hazards_are_listed_once_each_in_the_order_they_were_met() {
+        // RDW files one row per hazard, so two recalls on one vehicle routinely
+        // name the same one twice.
+        let v = vehicle(
+            &with_recalls(
+                json!("Ja"),
+                json!([
+                    {"risks": [
+                        {"mogelijk_gevaar": "Verminderde remwerking"},
+                        {"mogelijk_gevaar": "Brandgevaar"},
+                    ]},
+                    {"risks": [
+                        {"mogelijk_gevaar": "Brandgevaar"},
+                        {"mogelijk_gevaar": "Verlies van stuurbekrachtiging"},
+                    ]},
+                ]),
+            ),
+            None,
+        );
+        assert_eq!(v["open_recall_count"], json!(2));
+        assert_eq!(
+            v["open_recall_hazards"],
+            json!([
+                "Verminderde remwerking",
+                "Brandgevaar",
+                "Verlies van stuurbekrachtiging",
+            ])
+        );
+    }
+
+    #[test]
+    fn the_dutch_registration_lag_is_a_day_count_and_needs_both_dates() {
+        let both = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "datum_eerste_toelating": "20190301",
+                "datum_eerste_tenaamstelling_in_nederland": "20190401",
+            })),
+            None,
+        );
+        assert_eq!(both["first_dutch_registration"], "2019-04-01");
+        assert_eq!(both["dutch_registration_lag_days"], json!(31));
+
+        // A vehicle admitted and registered here on the same day has a lag of
+        // zero, which is a fact. Only one of the two dates is no fact at all.
+        let same = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "datum_eerste_toelating": "20190301",
+                "datum_eerste_tenaamstelling_in_nederland": "20190301",
+            })),
+            None,
+        );
+        assert_eq!(same["dutch_registration_lag_days"], json!(0));
+
+        let one = vehicle(
+            &row(json!({"kenteken": "X99XXX", "datum_eerste_toelating": "20190301"})),
+            None,
+        );
+        assert_eq!(one["first_dutch_registration"], Value::Null);
+        assert_eq!(one["dutch_registration_lag_days"], Value::Null);
+    }
+
+    #[test]
+    fn an_odometer_reason_is_resolved_from_the_table_and_never_guessed() {
+        let flagged = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "tellerstandoordeel": "Onlogisch",
+                "code_toelichting_tellerstandoordeel": "04",
+            })),
+            None,
+        );
+        assert_eq!(flagged["odometer"], "inconsistent");
+        assert!(
+            flagged["odometer_reason"]
+                .as_str()
+                .expect("code 04 is in the embedded table")
+                .contains("teruggedraaid"),
+            "got {}",
+            flagged["odometer_reason"]
+        );
+
+        for code in ["NG", "ZZ"] {
+            let v = vehicle(
+                &row(json!({
+                    "kenteken": "X99XXX",
+                    "code_toelichting_tellerstandoordeel": code,
+                })),
+                None,
+            );
+            assert_eq!(v["odometer_reason"], Value::Null, "code {code}");
+        }
+    }
+
+    #[test]
+    fn a_recall_with_no_published_detail_still_derives_its_reference_and_status() {
+        // A status row may name a reference the detail dataset has nothing for.
+        // Every key is still there, and none of them is invented.
+        let r = recall(&row(json!({
+            "kenteken": "X99XXX",
+            "referentiecode_rdw": "MGP230085",
+            "code_status": "O",
+            "status": "Openstaand",
+        })));
+        assert_eq!(r["plate"], "X-99-XXX");
+        assert_eq!(r["reference"], "MGP230085");
+        assert_eq!(r["open"], json!(true));
+        assert_eq!(r["defect"], Value::Null);
+        assert_eq!(r["repair"], Value::Null);
+        assert_eq!(r["hazards"], json!([]));
+        assert_eq!(r["vehicles_affected"], Value::Null);
+    }
+
+    #[test]
+    fn a_resolved_recall_carries_the_defect_the_repair_and_the_dates() {
+        let r = recall(&row(json!({
+            "kenteken": "X99XXX",
+            "referentiecode_rdw": "MGP230291",
+            "code_status": "P",
+            "status": "Hersteld",
+            "recall": {
+                "omschrijving_defect": "De remleiding kan gaan schuren.",
+                "categorie_defect": "Remsysteem",
+                "beschrijving_van_het_herstel": "De remleiding wordt vervangen.",
+                "meldende_producent_distributeur": "Iveco Nederland B.V.",
+                "publicatiedatum_rdw": "20230417",
+                "datum_eigenaren_ge_nformeerd": "20230502",
+                "totaal_aantal_voertuigen_terugroepactie": "1834",
+            },
+            "risks": [{"mogelijk_gevaar": "Verminderde remwerking"}],
+        })));
+        assert_eq!(r["open"], json!(false));
+        assert_eq!(r["defect"], "De remleiding kan gaan schuren.");
+        assert_eq!(r["category"], "Remsysteem");
+        assert_eq!(r["repair"], "De remleiding wordt vervangen.");
+        assert_eq!(r["hazards"], json!(["Verminderde remwerking"]));
+        assert_eq!(r["published"], "2023-04-17");
+        assert_eq!(r["owners_informed"], "2023-05-02");
+        assert_eq!(r["vehicles_affected"], json!(1834));
+    }
+
+    #[test]
+    fn a_tachograph_finding_carries_a_stable_alarm_and_a_routine_check_does_not() {
+        let cases = [
+            ("manipulatie tacho", Some("tachograph_tampering")),
+            ("Manipulatie Tacho", Some("tachograph_tampering")),
+            ("  zegelverbreking tacho ", Some("tachograph_seal_broken")),
+            // The negative control. `periodieke controle` is 24.7M of the 24.9M
+            // rows in this dataset; an alarm that fired on it would be noise.
+            ("periodieke controle", None),
+            ("inbouw", None),
+            ("uitbouw", None),
+        ];
+        for (kind, expected) in cases {
+            let i = inspection(&row(json!({
+                "kenteken": "X99XXX",
+                "soort_melding_ki_omschrijving": kind,
+            })));
+            assert_eq!(i["alarm"], json!(expected), "notification {kind:?}");
+            // RDW's own wording stays in the derived block whatever the verdict.
+            assert_eq!(i["kind"], kind.trim());
+        }
+    }
+
+    #[test]
+    fn an_inspection_derives_iso_dates_and_the_expiry_it_produced() {
+        let i = inspection(&row(json!({
+            "kenteken": "X99XXX",
+            "meld_datum_door_keuringsinstantie": "20250304",
+            "soort_melding_ki_omschrijving": "periodieke controle",
+            "soort_erkenning_omschrijving": "APK lichte voertuigen",
+            "vervaldatum_keuring": "20260304",
+        })));
+        assert_eq!(i["plate"], "X-99-XXX");
+        assert_eq!(i["date"], "2025-03-04");
+        assert_eq!(i["accreditation"], "APK lichte voertuigen");
+        assert_eq!(i["expiry"], "2026-03-04");
+
+        // An inspection that produced no expiry is null, never today's date and
+        // never the notification date.
+        let none = inspection(&row(json!({
+            "kenteken": "X99XXX",
+            "meld_datum_door_keuringsinstantie": "20250304",
+            "soort_melding_ki_omschrijving": "inbouw",
+        })));
+        assert_eq!(none["expiry"], Value::Null);
     }
 }

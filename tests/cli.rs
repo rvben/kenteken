@@ -50,15 +50,23 @@ fn datasets_answers_without_touching_the_network() {
     let out = run(&["datasets"]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     let v: Value = serde_json::from_str(&out.stdout).expect("stdout is JSON when piped");
-    assert!(v["total"].as_u64().unwrap() >= 13);
+    assert!(v["total"].as_u64().unwrap() >= 18);
     let names: Vec<&str> = v["items"]
         .as_array()
         .unwrap()
         .iter()
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"voertuigen"));
-    assert!(names.contains(&"gebreken"));
+    for dataset in [
+        "voertuigen",
+        "gebreken",
+        "terugroepactie-status",
+        "terugroepactie",
+        "terugroepactie-risico",
+        "meldingen",
+    ] {
+        assert!(names.contains(&dataset), "{dataset} is not listed");
+    }
 }
 
 #[test]
@@ -300,7 +308,7 @@ fn limit_and_offset_page_without_lying_about_the_total() {
 
 #[test]
 fn a_text_page_cut_short_by_limit_says_so_on_stderr() {
-    // Text output is just the rows. A human given two of thirteen datasets with
+    // Text output is just the rows. A human given two of eighteen datasets with
     // nothing said would take those two for the whole list.
     let total = serde_json::from_str::<Value>(&run(&["datasets"]).stdout).unwrap()["total"]
         .as_u64()
@@ -347,7 +355,16 @@ fn help_and_version_print_normally_and_exit_zero() {
 #[test]
 fn help_lists_every_command() {
     let out = run(&["--help"]);
-    for command in ["lookup", "defects", "fuel", "raw", "datasets", "schema"] {
+    for command in [
+        "lookup",
+        "defects",
+        "fuel",
+        "recalls",
+        "inspections",
+        "raw",
+        "datasets",
+        "schema",
+    ] {
         assert!(
             out.stdout.contains(command),
             "--help does not mention {command}"

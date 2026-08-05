@@ -171,10 +171,22 @@ pub fn humanize_offset(days: i64) -> String {
     if days == 0 {
         return "today".to_string();
     }
+    let phrase = humanize_span(days);
+    if days > 0 {
+        format!("in {phrase}")
+    } else {
+        format!("{phrase} ago")
+    }
+}
+
+/// A day count as a bare phrase: `30 days`, `3 months`, `1 year 4 months`.
+///
+/// The same coarse phrasing as [`humanize_offset`] with no direction attached,
+/// for the distance between two dates rather than from today.
+pub fn humanize_span(days: i64) -> String {
     let magnitude = days.unsigned_abs();
-    let phrase = if magnitude < 45 {
-        let d = magnitude;
-        format!("{d} day{}", plural(d))
+    if magnitude < 45 {
+        units(magnitude, "day")
     } else if magnitude < 365 {
         // The last fortnight of the year rounds up to a full twelve months, so
         // it is spelled as the year it has all but reached.
@@ -192,11 +204,6 @@ pub fn humanize_offset(days: i64) -> String {
             12 => units(years + 1, "year"),
             m => format!("{} {}", units(years, "year"), units(m, "month")),
         }
-    };
-    if days > 0 {
-        format!("in {phrase}")
-    } else {
-        format!("{phrase} ago")
     }
 }
 
@@ -419,6 +426,20 @@ mod tests {
         assert_eq!(humanize_offset(-30), "30 days ago");
         assert_eq!(humanize_offset(90), "in 3 months");
         assert_eq!(humanize_offset(-90), "3 months ago");
+    }
+
+    #[test]
+    fn a_span_carries_no_direction_and_agrees_with_the_offset_phrasing() {
+        assert_eq!(humanize_span(0), "0 days");
+        assert_eq!(humanize_span(1), "1 day");
+        assert_eq!(humanize_span(494), "1 year 4 months");
+        // The two are one computation: a span is the offset phrase without the
+        // "in"/"ago", so they can never disagree about how long 90 days is.
+        for days in [1i64, 7, 44, 45, 90, 364, 365, 494, 730] {
+            let span = humanize_span(days);
+            assert_eq!(humanize_offset(days), format!("in {span}"));
+            assert_eq!(humanize_offset(-days), format!("{span} ago"));
+        }
     }
 
     #[test]

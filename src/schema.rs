@@ -113,6 +113,22 @@ fn commands() -> Value {
             "output_fields": fuel_fields()
         },
         {
+            "name": "recalls",
+            "description": "Manufacturer recalls for a vehicle, open ones first, each resolved from its reference code to the defect, the hazard, the repair and who to contact. Repaired recalls are listed too, so the absence of an open one is visible as a fact rather than as an empty result.",
+            "mutating": false,
+            "stability": "stable",
+            "args": [plates_arg()],
+            "output_fields": recall_fields()
+        },
+        {
+            "name": "inspections",
+            "description": "Notifications filed against a vehicle by inspection bodies, newest first: periodic inspections, tachograph fitting and removal, and tachograph findings.",
+            "mutating": false,
+            "stability": "stable",
+            "args": [plates_arg()],
+            "output_fields": inspection_fields()
+        },
+        {
             "name": "raw",
             "description": "Rows from any known RDW dataset, exactly as RDW returned them.",
             "mutating": false,
@@ -179,13 +195,35 @@ fn plates_arg() -> Value {
 /// the untouched RDW columns can filter them the same way this tool does.
 /// Reading one of these as a value is how a one-tone car acquires a second
 /// colour.
-const SENTINELS: &str = "RDW writes a placeholder rather than leaving a column empty: N.v.t., Niet geregistreerd, or Geen verstrekking in Open Data. The columns above carry them verbatim; here they are null.";
+const SENTINELS: &str = "RDW writes a placeholder rather than leaving a column empty: N.v.t., Niet geregistreerd, Geen verstrekking in Open Data, Niet bekend, or (Nog) niet bekend. The columns above carry them verbatim; here they are null.";
+
+/// Several field lists as one `output_fields` array.
+fn joined(groups: impl IntoIterator<Item = Value>) -> Value {
+    Value::Array(
+        groups
+            .into_iter()
+            .flat_map(|group| match group {
+                Value::Array(fields) => fields,
+                other => panic!("a field list is an array, got {other}"),
+            })
+            .collect(),
+    )
+}
+
+/// What `lookup` returns: RDW's own columns, then this tool's reading of them.
+///
+/// Declared as two lists because they are two contracts. What RDW sends can
+/// change with the register; the `derived` block is this tool's promise, and a
+/// consumer that reads only it never has to know a Dutch column name.
+fn vehicle_fields() -> Value {
+    joined([vehicle_columns(), vehicle_derived()])
+}
 
 /// The columns of the vehicle register worth declaring.
 ///
 /// RDW serves 62 columns and adds to them; rows are passed through untouched, so
 /// this lists the fields a consumer can rely on rather than everything present.
-fn vehicle_fields() -> Value {
+fn vehicle_columns() -> Value {
     json!([
         {"name": "kenteken", "type": "string", "description": "Plate, uppercase and without separators."},
         {"name": "merk", "type": "string", "description": "Make."},
@@ -205,7 +243,16 @@ fn vehicle_fields() -> Value {
         {"name": "openstaande_terugroepactie_indicator", "type": "string", "description": "Whether an unresolved recall applies (Ja/Nee)."},
         {"name": "export_indicator", "type": "string", "description": "Whether the vehicle has been exported (Ja/Nee)."},
         {"name": "tenaamstellen_mogelijk", "type": "string", "description": "Whether the registration can be transferred (Ja/Nee)."},
+        {"name": "datum_eerste_tenaamstelling_in_nederland", "type": "string", "description": "First registration in the Netherlands, YYYYMMDD. Later than datum_eerste_toelating for a vehicle first admitted abroad."},
+        {"name": "code_toelichting_tellerstandoordeel", "type": "string", "description": "RDW's code for why the odometer was judged as it was; see derived.odometer_reason."},
         {"name": "fuel", "type": "array", "description": "The vehicle's fuel rows, added by this tool. Empty when RDW records none."},
+        {"name": "recalls", "type": "array", "description": "The vehicle's open recalls, added by this tool, in the shape `recalls` returns. Empty both when there are none and when the register reported one this run could not resolve; derived.open_recall_count tells the two apart. Repaired recalls are not here; `kenteken recalls` lists those."}
+    ])
+}
+
+/// This tool's reading of a vehicle row.
+fn vehicle_derived() -> Value {
+    json!([
         {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the row. Every key below is always present; a fact RDW did not supply is null and never a stand-in value.")},
         {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form, e.g. X-99-XXX."},
         {"name": "derived.make", "type": "string | null"},
@@ -221,6 +268,8 @@ fn vehicle_fields() -> Value {
         {"name": "derived.first_admission", "type": "string | null", "description": "First admission to the road, ISO 8601."},
         {"name": "derived.age_days", "type": "integer | null", "description": "Days since first admission."},
         {"name": "derived.registered_since", "type": "string | null", "description": "Date of the current registration, ISO 8601."},
+        {"name": "derived.first_dutch_registration", "type": "string | null", "description": "First registration in the Netherlands, ISO 8601."},
+        {"name": "derived.dutch_registration_lag_days", "type": "integer | null", "description": "Days between first admission to the road and first Dutch registration. A positive number means the vehicle was on the road elsewhere first, which usually but not always means an import: RDW publishes no import flag, so this is the gap and not a verdict."},
         {"name": "derived.fuels", "type": "string[]", "description": "Every fuel the vehicle runs on, in RDW's sequence. Empty when RDW records none."},
         {"name": "derived.power_kw", "type": "number | null", "description": "Net maximum power of the primary fuel, in kW. Read from the electric power column when that is the one RDW filled in."},
         {"name": "derived.co2_g_per_km", "type": "number | null", "description": "Combined CO2 in g/km."},
@@ -230,8 +279,11 @@ fn vehicle_fields() -> Value {
         {"name": "derived.mass_max_kg", "type": "integer | null"},
         {"name": "derived.catalogue_price_eur", "type": "integer | null"},
         {"name": "derived.odometer", "type": "string | null", "description": "consistent, inconsistent, or no_judgement. Null when RDW recorded no verdict, which is not the same as no_judgement: RDW looked and declined to judge."},
+        {"name": "derived.odometer_reason", "type": "string | null", "description": "RDW's own explanation of that verdict, resolved from the table embedded in this binary. Null when this build does not know the code."},
         {"name": "derived.insured", "type": "boolean | null", "description": "Third-party (WAM) insurance on record."},
-        {"name": "derived.open_recall", "type": "boolean | null"},
+        {"name": "derived.open_recall", "type": "boolean | null", "description": "Whether the register reports an unresolved recall."},
+        {"name": "derived.open_recall_count", "type": "integer | null", "description": "How many open recalls this run resolved. Null means the count is unknown, never that there are none: a register saying a recall is open while no recall row came back is a gap in the answer. Zero is only reported when RDW said there is no open recall."},
+        {"name": "derived.open_recall_hazards", "type": "string[] | null", "description": "The hazards those recalls name, deduplicated. Null whenever open_recall_count is null, so an unresolved recall never reads as no hazards."},
         {"name": "derived.exported", "type": "boolean | null"},
         {"name": "derived.taxi", "type": "boolean | null"},
         {"name": "derived.transferable", "type": "boolean | null", "description": "Whether the registration can be transferred."}
@@ -272,6 +324,58 @@ fn fuel_fields() -> Value {
         {"name": "derived.electric_range_km", "type": "number | null"},
         {"name": "derived.euro_class", "type": "string | null"},
         {"name": "derived.consumption_l_per_100km", "type": "number | null"}
+    ])
+}
+
+/// The columns of a recall, across the three datasets it is spread over.
+///
+/// RDW's recall register says only which recalls apply to a plate and whether
+/// each is still open; the defect, the repair and the contact details are keyed
+/// by reference code in a second dataset, and the hazards in a third. This tool
+/// joins them, so an item carries the status row's own columns plus `recall` and
+/// `risks`.
+fn recall_fields() -> Value {
+    json!([
+        {"name": "kenteken", "type": "string"},
+        {"name": "referentiecode_rdw", "type": "string", "description": "RDW's reference for the recall, and the key the other two datasets are joined on."},
+        {"name": "code_status", "type": "string", "description": "O for open, P for a repair the manufacturer has reported."},
+        {"name": "status", "type": "string", "description": "RDW's display text for that code, e.g. Openstaand."},
+        {"name": "recall", "type": "object | null", "description": "The row from RDW's recall dataset for this reference, untouched. Null when RDW published a status row for a reference it has no detail for, which happens and is left visible."},
+        {"name": "risks", "type": "array", "description": "The hazard rows for this reference, untouched. RDW files one row per hazard, so a recall routinely names several."},
+        {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the recall, with the three datasets already joined. Open recalls come first; within each group, RDW's own order is kept.")},
+        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form."},
+        {"name": "derived.reference", "type": "string | null", "description": "RDW's reference code for the recall."},
+        {"name": "derived.open", "type": "boolean | null", "description": "Whether the recall is still outstanding, read from code_status. Null when RDW recorded no status: reporting that as repaired would tell an owner their recall is done on no evidence."},
+        {"name": "derived.status", "type": "string | null", "description": "RDW's own words for the status."},
+        {"name": "derived.defect", "type": "string | null", "description": "What is wrong with the vehicle."},
+        {"name": "derived.category", "type": "string | null", "description": "RDW's classification of the defect."},
+        {"name": "derived.consequences", "type": "string | null", "description": "What the defect leads to if left unrepaired."},
+        {"name": "derived.hazards", "type": "string[]", "description": "The hazards this recall names, deduplicated and in RDW's order. Empty when RDW published none."},
+        {"name": "derived.repair", "type": "string | null", "description": "What the manufacturer does to fix it."},
+        {"name": "derived.manufacturer", "type": "string | null", "description": "The manufacturer or distributor that reported the recall."},
+        {"name": "derived.more_info_url", "type": "string | null"},
+        {"name": "derived.more_info_phone", "type": "string | null"},
+        {"name": "derived.published", "type": "string | null", "description": "Date RDW published the recall, ISO 8601."},
+        {"name": "derived.owners_informed", "type": "string | null", "description": "Date owners were informed, ISO 8601."},
+        {"name": "derived.vehicles_affected", "type": "integer | null", "description": "How many vehicles the recall covers in total, not how many are still unrepaired."}
+    ])
+}
+
+/// The columns of a notification filed by an inspection body.
+fn inspection_fields() -> Value {
+    json!([
+        {"name": "kenteken", "type": "string"},
+        {"name": "meld_datum_door_keuringsinstantie", "type": "string", "description": "Date the inspection body filed the notification, YYYYMMDD."},
+        {"name": "soort_melding_ki_omschrijving", "type": "string", "description": "What was filed: Periodieke controle, Inbouw, Uitbouw, Manipulatie tacho, or Zegelverbreking tacho."},
+        {"name": "soort_erkenning_omschrijving", "type": "string", "description": "The accreditation the body filed it under."},
+        {"name": "vervaldatum_keuring", "type": "string", "description": "The expiry this inspection produced, YYYYMMDD. Absent for a notification that produces none."},
+        {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the row. Rows arrive newest first, so a page cut short by --limit shows the most recent.")},
+        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form."},
+        {"name": "derived.date", "type": "string | null", "description": "Date filed, ISO 8601."},
+        {"name": "derived.kind", "type": "string | null", "description": "What was filed, in RDW's own words."},
+        {"name": "derived.accreditation", "type": "string | null"},
+        {"name": "derived.expiry", "type": "string | null", "description": "The expiry this inspection produced, ISO 8601. Null for a notification that produces none, which is not the same as an expiry in the past."},
+        {"name": "derived.alarm", "type": "string | null", "enum_note": "tachograph_tampering | tachograph_seal_broken", "description": "Set when the notification is a finding against the vehicle rather than a routine event: someone interfered with the instrument recording a professional driver's hours. Null for every other kind."}
     ])
 }
 
@@ -457,17 +561,28 @@ mod tests {
             .collect()
     }
 
+    /// Every command that emits a `derived` block, with the block it emits.
+    ///
+    /// Built from an empty row, which is the shape that proves the keys are
+    /// unconditional: a block whose keys depend on what RDW happened to send
+    /// would drop out of the contract for exactly the rows a consumer needs it
+    /// most.
+    fn derived_blocks() -> Vec<(&'static str, Value)> {
+        let empty = json!({});
+        vec![
+            ("lookup", crate::facts::vehicle(&empty, None)),
+            ("defects", crate::facts::defect(&empty)),
+            ("fuel", crate::facts::fuel(&empty)),
+            ("recalls", crate::facts::recall(&empty)),
+            ("inspections", crate::facts::inspection(&empty)),
+        ]
+    }
+
     #[test]
     fn every_derived_key_the_code_emits_is_declared() {
         // The derived block is what an agent reads instead of RDW's Dutch
         // columns. An undeclared key is a fact no consumer knows to ask for.
-        let empty = json!({});
-        let blocks = [
-            ("lookup", crate::facts::vehicle(&empty, None)),
-            ("defects", crate::facts::defect(&empty)),
-            ("fuel", crate::facts::fuel(&empty)),
-        ];
-        for (command, block) in blocks {
+        for (command, block) in derived_blocks() {
             let declared = declared_fields(command);
             assert!(
                 declared.iter().any(|f| f == "derived"),
@@ -485,13 +600,7 @@ mod tests {
 
     #[test]
     fn no_derived_key_is_declared_that_the_code_never_emits() {
-        let empty = json!({});
-        let blocks = [
-            ("lookup", crate::facts::vehicle(&empty, None)),
-            ("defects", crate::facts::defect(&empty)),
-            ("fuel", crate::facts::fuel(&empty)),
-        ];
-        for (command, block) in blocks {
+        for (command, block) in derived_blocks() {
             let emitted = block.as_object().unwrap();
             for field in declared_fields(command) {
                 let Some(key) = field.strip_prefix("derived.") else {
@@ -516,7 +625,7 @@ mod tests {
                 "the placeholder note omits {sentinel}, which the code filters"
             );
         }
-        for command in ["lookup", "defects", "fuel"] {
+        for (command, _) in derived_blocks() {
             let note = contract()["commands"]
                 .as_array()
                 .unwrap()
@@ -534,6 +643,25 @@ mod tests {
             assert!(
                 note.ends_with(SENTINELS),
                 "{command} describes its derived block without RDW's placeholders: {note}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_command_declares_a_derived_block_that_the_drift_tests_skip() {
+        // The two tests above are only as strong as the list they iterate. A
+        // command added to the contract but not to that list would have its
+        // derived keys checked by nothing at all, which is the failure mode the
+        // drift tests exist to prevent.
+        let covered: Vec<&str> = derived_blocks().iter().map(|(name, _)| *name).collect();
+        for command in contract()["commands"].as_array().unwrap() {
+            let name = command["name"].as_str().unwrap();
+            let declares_derived = command["output_fields"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|f| f["name"] == "derived"));
+            assert!(
+                !declares_derived || covered.contains(&name),
+                "{name} declares a derived block that no drift test checks"
             );
         }
     }

@@ -28,7 +28,9 @@ pub mod gebreken;
 pub mod output;
 pub mod plate;
 pub mod rdw;
+pub mod recall;
 pub mod schema;
+pub mod tellerstand;
 
 pub use error::{EXIT_PARTIAL, KentekenError};
 pub use plate::{Plate, PlateError};
@@ -74,6 +76,10 @@ pub enum Command {
     Defects { plates: Vec<Plate> },
     /// Fuel and emissions rows.
     Fuel { plates: Vec<Plate> },
+    /// Recalls, open and repaired, resolved to what they are about.
+    Recalls { plates: Vec<Plate> },
+    /// Notifications filed by inspection bodies.
+    Inspections { plates: Vec<Plate> },
     /// Unmodified rows from any known dataset.
     Raw {
         dataset: Dataset,
@@ -89,6 +95,8 @@ impl Command {
             Command::Lookup { plates }
             | Command::Defects { plates }
             | Command::Fuel { plates }
+            | Command::Recalls { plates }
+            | Command::Inspections { plates }
             | Command::Raw { plates, .. } => plates,
             Command::Datasets => &[],
         }
@@ -100,6 +108,8 @@ impl Command {
             Command::Lookup { .. } => Some(rdw::datasets::VEHICLE),
             Command::Defects { .. } => Some(rdw::datasets::DEFECTS),
             Command::Fuel { .. } => Some(rdw::datasets::FUEL),
+            Command::Recalls { .. } => Some(rdw::datasets::RECALL_STATUS),
+            Command::Inspections { .. } => Some(rdw::datasets::INSPECTIONS),
             Command::Raw { dataset, .. } => Some(*dataset),
             Command::Datasets => None,
         }
@@ -253,7 +263,49 @@ where
         }
     }
 
-    let fetched = fetch_all(source, plates, &tasks, request.concurrency)?;
+    let mut fetched = fetch_all(source, plates, &tasks, request.concurrency)?;
+
+    // A lookup asks about recalls only when the register says there is one
+    // outstanding, so a clean vehicle still costs the same two requests it
+    // always did. This has to wait for the register rows, hence a second round.
+    if enrich {
+        let follow: Vec<(usize, Dataset)> = plates
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                rows_of(&fetched, &tasks, *i, target)
+                    .iter()
+                    .any(recall_open)
+            })
+            .map(|(i, _)| (i, rdw::datasets::RECALL_STATUS))
+            .collect();
+        fetched.extend(fetch_all(source, plates, &follow, request.concurrency)?);
+        tasks.extend(follow);
+    }
+
+    // Status rows name a recall by reference and say nothing else about it. Every
+    // reference this run collected, across every plate, is resolved together: one
+    // request per recall dataset whether that is one recall or forty.
+    let references = recall::references(
+        tasks
+            .iter()
+            .zip(&fetched)
+            .filter(|((_, dataset), _)| *dataset == rdw::datasets::RECALL_STATUS)
+            .flat_map(|(_, rows)| rows.iter()),
+    );
+    let joined = recall::resolve(
+        source,
+        &[rdw::datasets::RECALL_DETAIL, rdw::datasets::RECALL_RISK],
+        &references,
+        request.concurrency,
+    )?;
+
+    let context = Fetched {
+        rows: &fetched,
+        tasks: &tasks,
+        joined: &joined,
+        today,
+    };
 
     let mut items = Vec::new();
     let mut not_found = Vec::new();
@@ -278,7 +330,7 @@ where
         }
 
         for row in target_rows {
-            items.push(decorate(row, &request.command, &fetched, &tasks, i, today));
+            items.push(decorate(row, &request.command, &context, i));
         }
     }
 
@@ -289,27 +341,71 @@ where
     })
 }
 
+/// Everything one run fetched, addressed by plate and dataset.
+struct Fetched<'a> {
+    /// One entry per task, in task order.
+    rows: &'a [Vec<Row>],
+    tasks: &'a [(usize, Dataset)],
+    /// The reference-keyed recall datasets, indexed by reference code.
+    joined: &'a recall::Joined,
+    today: Option<date::Date>,
+}
+
+impl Fetched<'_> {
+    fn rows(&self, plate_index: usize, dataset: Dataset) -> &[Row] {
+        rows_of(self.rows, self.tasks, plate_index, dataset)
+    }
+
+    /// A recall status row with the datasets keyed by its reference joined on.
+    ///
+    /// `recall` is `null` and `risks` empty when RDW published a status row for
+    /// a reference it has no detail for, which happens and must stay visible.
+    fn recall_item(&self, status: &Row) -> Value {
+        let reference = status
+            .get(recall::REFERENCE)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let mut item = status.clone();
+        item.insert(
+            "recall".into(),
+            match self.joined.row(&rdw::datasets::RECALL_DETAIL, reference) {
+                Some(detail) => Value::Object(detail.clone()),
+                None => Value::Null,
+            },
+        );
+        item.insert(
+            "risks".into(),
+            json!(self.joined.rows(&rdw::datasets::RECALL_RISK, reference)),
+        );
+        Value::Object(item)
+    }
+}
+
 /// Add whatever the command layers on top of a raw RDW row.
 ///
 /// Everything computed goes under `derived`, next to RDW's untouched columns,
 /// which keeps the two apart: an agent reading `vervaldatum_apk` gets exactly
 /// what RDW sent, and one reading `derived.apk_expired` gets this tool's answer.
 /// `raw` gets neither, because it promises rows as RDW returned them.
-fn decorate(
-    row: &Row,
-    command: &Command,
-    fetched: &[Result<Vec<Row>, KentekenError>],
-    tasks: &[(usize, Dataset)],
-    plate_index: usize,
-    today: Option<date::Date>,
-) -> Value {
+fn decorate(row: &Row, command: &Command, fetched: &Fetched, plate_index: usize) -> Value {
     let mut row = row.clone();
     match command {
         Command::Lookup { .. } => {
-            let fuel = rows_of(fetched, tasks, plate_index, rdw::datasets::FUEL);
-            row.insert("fuel".into(), json!(fuel));
+            row.insert(
+                "fuel".into(),
+                json!(fetched.rows(plate_index, rdw::datasets::FUEL)),
+            );
+            // Only the open ones. A repaired recall is history, and the summary
+            // answers what is wrong with this vehicle now; `recalls` shows both.
+            let open: Vec<Value> = fetched
+                .rows(plate_index, rdw::datasets::RECALL_STATUS)
+                .iter()
+                .filter(|status| recall::is_open(status) == Some(true))
+                .map(|status| fetched.recall_item(status))
+                .collect();
+            row.insert("recalls".into(), json!(open));
             let item = Value::Object(row.clone());
-            row.insert("derived".into(), facts::vehicle(&item, today));
+            row.insert("derived".into(), facts::vehicle(&item, fetched.today));
         }
         Command::Defects { .. } => {
             // `null` and not a placeholder string: an unrecognised code must stay
@@ -326,14 +422,37 @@ fn decorate(
             let item = Value::Object(row.clone());
             row.insert("derived".into(), facts::fuel(&item));
         }
+        Command::Recalls { .. } => {
+            let item = fetched.recall_item(&row);
+            row = item
+                .as_object()
+                .expect("a recall item is an object")
+                .clone();
+            row.insert("derived".into(), facts::recall(&item));
+        }
+        Command::Inspections { .. } => {
+            let item = Value::Object(row.clone());
+            row.insert("derived".into(), facts::inspection(&item));
+        }
         Command::Raw { .. } | Command::Datasets => {}
     }
     Value::Object(row)
 }
 
+/// Whether a register row says a recall is outstanding on this vehicle.
+///
+/// Read through [`facts::flag`] so the register's `Ja`/`Nee` is interpreted in
+/// exactly one place. A column RDW left unfilled is not a "no".
+fn recall_open(register_row: &Row) -> bool {
+    facts::flag(
+        &Value::Object(register_row.clone()),
+        "openstaande_terugroepactie_indicator",
+    ) == Some(true)
+}
+
 /// Rows fetched for one (plate, dataset) pair.
 fn rows_of<'a>(
-    fetched: &'a [Result<Vec<Row>, KentekenError>],
+    fetched: &'a [Vec<Row>],
     tasks: &[(usize, Dataset)],
     plate_index: usize,
     dataset: Dataset,
@@ -342,52 +461,70 @@ fn rows_of<'a>(
         .iter()
         .position(|(i, d)| *i == plate_index && *d == dataset)
         .and_then(|slot| fetched.get(slot))
-        .and_then(|r| r.as_ref().ok())
         .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
-/// Run every task across a bounded set of threads, preserving task order.
-///
-/// The first failure aborts the whole run. A network error must never be
-/// downgraded into "this plate is not registered".
+/// Fetch one dataset per task, in parallel, keeping the results in task order.
 fn fetch_all<S>(
     source: &S,
     plates: &[Plate],
     tasks: &[(usize, Dataset)],
     concurrency: usize,
-) -> Result<Vec<Result<Vec<Row>, KentekenError>>, KentekenError>
+) -> Result<Vec<Vec<Row>>, KentekenError>
 where
     S: RdwSource + Sync,
 {
-    let mut results: Vec<Result<Vec<Row>, KentekenError>> =
-        tasks.iter().map(|_| Ok(Vec::new())).collect();
-    if tasks.is_empty() {
-        return Ok(results);
-    }
+    fetch_concurrently(tasks, concurrency, |(plate_index, dataset)| {
+        source.rows_for_plate(dataset, &plates[*plate_index])
+    })
+}
 
-    let width = concurrency.clamp(1, MAX_CONCURRENCY).min(tasks.len());
-    let chunk = tasks.len().div_ceil(width);
+/// Run every fetch across a bounded set of threads, preserving input order.
+///
+/// The first failure aborts the whole run. A network error must never be
+/// downgraded into "this plate is not registered", so there is no partial
+/// success here: either every fetch produced rows, or the run reports why not.
+pub(crate) fn fetch_concurrently<T, F>(
+    items: &[T],
+    concurrency: usize,
+    fetch: F,
+) -> Result<Vec<Vec<Row>>, KentekenError>
+where
+    T: Sync,
+    F: Fn(&T) -> Result<Vec<Row>, KentekenError> + Sync,
+{
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut results: Vec<Result<Vec<Row>, KentekenError>> =
+        items.iter().map(|_| Ok(Vec::new())).collect();
+
+    let width = concurrency.clamp(1, MAX_CONCURRENCY).min(items.len());
+    let chunk = items.len().div_ceil(width);
 
     std::thread::scope(|scope| {
-        for (task_chunk, result_chunk) in tasks.chunks(chunk).zip(results.chunks_mut(chunk)) {
+        for (item_chunk, result_chunk) in items.chunks(chunk).zip(results.chunks_mut(chunk)) {
+            let fetch = &fetch;
             scope.spawn(move || {
-                for ((plate_index, dataset), slot) in task_chunk.iter().zip(result_chunk.iter_mut())
-                {
-                    *slot = source.rows_for_plate(dataset, &plates[*plate_index]);
+                for (item, slot) in item_chunk.iter().zip(result_chunk.iter_mut()) {
+                    *slot = fetch(item);
                 }
             });
         }
     });
 
-    // Report the earliest failure in task order, so the same inputs always
+    // Report the earliest failure in input order, so the same inputs always
     // produce the same error regardless of thread scheduling.
     if let Some(slot) = results.iter().position(Result::is_err) {
         return Err(results
             .swap_remove(slot)
             .expect_err("the slot holds an error"));
     }
-    Ok(results)
+    Ok(results
+        .into_iter()
+        .map(|rows| rows.expect("every slot was checked for an error above"))
+        .collect())
 }
 
 /// The dataset registry as items, for `kenteken datasets`.
@@ -444,30 +581,92 @@ fn project(items: Vec<Value>, fields: Option<&[String]>) -> Result<Vec<Value>, K
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     /// An in-memory source: no network, no live dataset.
     #[derive(Default)]
     struct FakeSource {
         rows: HashMap<(String, String), Vec<Row>>,
+        /// Rows of the datasets that are keyed by something other than a plate.
+        unkeyed: HashMap<String, Vec<Row>>,
         fail_with: Option<KentekenError>,
+        /// Every dataset this source was asked for, one entry per request.
+        ///
+        /// RDW is a free public service, so how many requests an answer costs is
+        /// part of the design and not an implementation detail. Recording them
+        /// is what lets a test assert that a clean lookup never pays for recall
+        /// detail it has no use for.
+        asked: Mutex<Vec<&'static str>>,
     }
 
     impl FakeSource {
         fn with(mut self, dataset: Dataset, plate: &str, rows: Vec<Value>) -> Self {
-            let rows = rows
-                .into_iter()
-                .map(|v| v.as_object().expect("row is an object").clone())
-                .collect();
-            self.rows.insert((dataset.id.into(), plate.into()), rows);
+            self.rows
+                .insert((dataset.id.into(), plate.into()), object_rows(rows));
+            self
+        }
+
+        /// Seed a dataset that is queried by column value rather than by plate.
+        fn with_rows(mut self, dataset: Dataset, rows: Vec<Value>) -> Self {
+            self.unkeyed.insert(dataset.id.into(), object_rows(rows));
             self
         }
 
         fn failing(err: KentekenError) -> Self {
             Self {
-                rows: HashMap::new(),
                 fail_with: Some(err),
+                ..Self::default()
             }
         }
+
+        fn failure(&self) -> Option<KentekenError> {
+            match self.fail_with.as_ref()? {
+                KentekenError::Timeout { seconds } => {
+                    Some(KentekenError::Timeout { seconds: *seconds })
+                }
+                _ => Some(KentekenError::RateLimit),
+            }
+        }
+
+        fn record(&self, dataset: &Dataset) {
+            self.asked
+                .lock()
+                .expect("no test panics while holding the lock")
+                .push(dataset.id);
+        }
+
+        /// How many requests the run made in total.
+        fn requests(&self) -> usize {
+            self.asked.lock().expect("the lock is not poisoned").len()
+        }
+
+        /// How many requests one dataset took.
+        fn times_asked(&self, dataset: Dataset) -> usize {
+            self.asked
+                .lock()
+                .expect("the lock is not poisoned")
+                .iter()
+                .filter(|id| **id == dataset.id)
+                .count()
+        }
+
+        /// Which datasets were asked for, deduplicated and sorted.
+        ///
+        /// Sorted because the fetches run across several threads, so the order
+        /// they arrive in is not stable; what a test asserts is which requests
+        /// happened, not when.
+        fn datasets_asked(&self) -> Vec<&'static str> {
+            let mut asked = self.asked.lock().expect("the lock is not poisoned").clone();
+            asked.sort_unstable();
+            asked.dedup();
+            asked
+        }
+    }
+
+    fn object_rows(rows: Vec<Value>) -> Vec<Row> {
+        rows.into_iter()
+            .map(|v| v.as_object().expect("row is an object").clone())
+            .collect()
     }
 
     impl RdwSource for FakeSource {
@@ -476,18 +675,42 @@ mod tests {
             dataset: &Dataset,
             plate: &Plate,
         ) -> Result<Vec<Row>, KentekenError> {
-            if let Some(err) = &self.fail_with {
-                return Err(match err {
-                    KentekenError::Timeout { seconds } => {
-                        KentekenError::Timeout { seconds: *seconds }
-                    }
-                    _ => KentekenError::RateLimit,
-                });
+            self.record(dataset);
+            if let Some(err) = self.failure() {
+                return Err(err);
             }
             Ok(self
                 .rows
                 .get(&(dataset.id.to_string(), plate.to_string()))
                 .cloned()
+                .unwrap_or_default())
+        }
+
+        fn rows_for_values(
+            &self,
+            dataset: &Dataset,
+            column: &str,
+            values: &[String],
+        ) -> Result<Vec<Row>, KentekenError> {
+            self.record(dataset);
+            if let Some(err) = self.failure() {
+                return Err(err);
+            }
+            // Filters the way RDW's `in (...)` does, so a test that seeds two
+            // recalls and asks for one gets one back.
+            Ok(self
+                .unkeyed
+                .get(dataset.id)
+                .map(|rows| {
+                    rows.iter()
+                        .filter(|row| {
+                            row.get(column)
+                                .and_then(Value::as_str)
+                                .is_some_and(|v| values.iter().any(|wanted| wanted == v))
+                        })
+                        .cloned()
+                        .collect()
+                })
                 .unwrap_or_default())
         }
     }
@@ -1069,6 +1292,370 @@ mod tests {
         );
         assert_eq!(fuel["items"][0]["derived"]["power_kw"], 103.0);
         assert_eq!(fuel["items"][0]["derived"]["fuel"], "Diesel");
+    }
+
+    /// A vehicle whose register row reports an open recall, with the status row
+    /// and both reference-keyed datasets seeded behind it.
+    ///
+    /// The reference code is RDW's own format: three letters and six digits.
+    fn source_with_an_open_recall() -> FakeSource {
+        FakeSource::default()
+            .with(
+                rdw::datasets::VEHICLE,
+                "X99XXX",
+                vec![json!({
+                    "kenteken": "X99XXX",
+                    "merk": "IVECO",
+                    "openstaande_terugroepactie_indicator": "Ja",
+                })],
+            )
+            .with(
+                rdw::datasets::RECALL_STATUS,
+                "X99XXX",
+                vec![json!({
+                    "kenteken": "X99XXX",
+                    "referentiecode_rdw": "MGP230291",
+                    "code_status": "O",
+                    "status": "Openstaand",
+                })],
+            )
+            .with_rows(
+                rdw::datasets::RECALL_DETAIL,
+                vec![json!({
+                    "referentiecode_rdw": "MGP230291",
+                    "omschrijving_defect": "De remleiding kan gaan schuren.",
+                    "beschrijving_van_het_herstel": "De remleiding wordt vervangen.",
+                    "meldende_producent_distributeur": "IVECO NEDERLAND B.V.",
+                    "publicatiedatum_rdw": "20230417",
+                    "totaal_aantal_voertuigen_terugroepactie": "1834",
+                })],
+            )
+            .with_rows(
+                rdw::datasets::RECALL_RISK,
+                vec![
+                    json!({"referentiecode_rdw": "MGP230291", "mogelijk_gevaar": "Kans op een ongeval"}),
+                    json!({"referentiecode_rdw": "MGP230291", "mogelijk_gevaar": "Kans op letsel"}),
+                ],
+            )
+    }
+
+    #[test]
+    fn a_lookup_with_an_open_recall_says_what_the_recall_is_about() {
+        // "Openstaande terugroepactie: Ja" on its own tells an owner nothing
+        // they can act on. The point of the second hop is the sentence.
+        let source = source_with_an_open_recall();
+        let outcome = run(
+            &source,
+            &request(Command::Lookup {
+                plates: vec![plate("X99XXX")],
+            }),
+        )
+        .unwrap();
+        let item = &envelope(&outcome)["items"][0];
+
+        assert_eq!(item["derived"]["open_recall"], true);
+        assert_eq!(item["derived"]["open_recall_count"], 1);
+        assert_eq!(
+            item["derived"]["open_recall_hazards"],
+            json!(["Kans op een ongeval", "Kans op letsel"])
+        );
+        assert_eq!(
+            item["recalls"][0]["recall"]["omschrijving_defect"],
+            "De remleiding kan gaan schuren."
+        );
+        assert_eq!(item["recalls"][0]["risks"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_clean_lookup_never_pays_for_recall_detail_it_has_no_use_for() {
+        // RDW is a free public service, and the overwhelming majority of
+        // vehicles have no open recall. Asking anyway would triple the cost of
+        // the common case to answer a question already answered by "Nee".
+        let source = FakeSource::default().with(
+            rdw::datasets::VEHICLE,
+            "X99XXX",
+            vec![json!({
+                "kenteken": "X99XXX",
+                "openstaande_terugroepactie_indicator": "Nee",
+            })],
+        );
+        let outcome = run(
+            &source,
+            &request(Command::Lookup {
+                plates: vec![plate("X99XXX")],
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            source.datasets_asked(),
+            {
+                let mut expected = vec![rdw::datasets::VEHICLE.id, rdw::datasets::FUEL.id];
+                expected.sort_unstable();
+                expected
+            },
+            "a clean lookup asked RDW for more than the register and the fuel rows"
+        );
+        assert_eq!(source.requests(), 2);
+
+        let derived = &envelope(&outcome)["items"][0]["derived"];
+        assert_eq!(derived["open_recall_count"], 0);
+        assert_eq!(derived["open_recall_hazards"], json!([]));
+    }
+
+    #[test]
+    fn a_register_that_reports_a_recall_nothing_resolved_leaves_the_count_unknown() {
+        // The register says a recall is open and the recall dataset came back
+        // empty. Reporting zero here would answer "nothing is wrong with this
+        // car" on the strength of the one column that says something is.
+        let source = FakeSource::default().with(
+            rdw::datasets::VEHICLE,
+            "X99XXX",
+            vec![json!({
+                "kenteken": "X99XXX",
+                "openstaande_terugroepactie_indicator": "Ja",
+            })],
+        );
+        let outcome = run(
+            &source,
+            &request(Command::Lookup {
+                plates: vec![plate("X99XXX")],
+            }),
+        )
+        .unwrap();
+        let derived = &envelope(&outcome)["items"][0]["derived"];
+
+        assert_eq!(derived["open_recall"], true, "the register still said Ja");
+        assert_eq!(derived["open_recall_count"], Value::Null);
+        assert_eq!(
+            derived["open_recall_hazards"],
+            Value::Null,
+            "an empty hazard list next to an unknown count reads as no hazards"
+        );
+    }
+
+    #[test]
+    fn recalls_lists_a_repaired_recall_too_resolved_to_what_it_was_about() {
+        // A repaired recall is the answer to "was anything ever wrong with this
+        // car", which is exactly what someone buying it is asking.
+        let source = source_with_an_open_recall()
+            .with(
+                rdw::datasets::RECALL_STATUS,
+                "X99XXX",
+                vec![
+                    json!({
+                        "kenteken": "X99XXX",
+                        "referentiecode_rdw": "MGP230291",
+                        "code_status": "O",
+                        "status": "Openstaand",
+                    }),
+                    json!({
+                        "kenteken": "X99XXX",
+                        "referentiecode_rdw": "MGP210044",
+                        "code_status": "P",
+                        "status": "Hersteld",
+                    }),
+                ],
+            )
+            .with_rows(
+                rdw::datasets::RECALL_DETAIL,
+                vec![
+                    json!({
+                        "referentiecode_rdw": "MGP230291",
+                        "omschrijving_defect": "De remleiding kan gaan schuren.",
+                    }),
+                    json!({
+                        "referentiecode_rdw": "MGP210044",
+                        "omschrijving_defect": "De gordelspanner kan onbedoeld activeren.",
+                    }),
+                ],
+            );
+
+        let v = envelope(
+            &run(
+                &source,
+                &request(Command::Recalls {
+                    plates: vec![plate("X99XXX")],
+                }),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(v["total"], 2);
+        assert_eq!(v["items"][0]["derived"]["open"], true);
+        assert_eq!(
+            v["items"][0]["derived"]["defect"],
+            "De remleiding kan gaan schuren."
+        );
+        assert_eq!(v["items"][1]["derived"]["open"], false);
+        assert_eq!(v["items"][1]["derived"]["status"], "Hersteld");
+        assert_eq!(
+            v["items"][1]["derived"]["defect"], "De gordelspanner kan onbedoeld activeren.",
+            "a repaired recall was listed without saying what it was about"
+        );
+    }
+
+    #[test]
+    fn a_recall_rdw_published_no_detail_for_stays_visible_rather_than_vanishing() {
+        // A status row may name a reference the detail dataset has nothing for.
+        // Dropping it would hide an open recall; inventing text for it would be
+        // worse.
+        let source = FakeSource::default()
+            .with(
+                rdw::datasets::VEHICLE,
+                "X99XXX",
+                vec![json!({"kenteken": "X99XXX"})],
+            )
+            .with(
+                rdw::datasets::RECALL_STATUS,
+                "X99XXX",
+                vec![json!({
+                    "kenteken": "X99XXX",
+                    "referentiecode_rdw": "MGP999999",
+                    "code_status": "O",
+                    "status": "Openstaand",
+                })],
+            );
+
+        let v = envelope(
+            &run(
+                &source,
+                &request(Command::Recalls {
+                    plates: vec![plate("X99XXX")],
+                }),
+            )
+            .unwrap(),
+        );
+        let item = &v["items"][0];
+
+        assert_eq!(v["total"], 1, "the open recall was dropped");
+        assert_eq!(item["recall"], Value::Null);
+        assert_eq!(item["risks"], json!([]));
+        assert_eq!(item["derived"]["reference"], "MGP999999");
+        assert_eq!(item["derived"]["open"], true);
+        assert_eq!(item["derived"]["defect"], Value::Null);
+        assert_eq!(item["derived"]["hazards"], json!([]));
+    }
+
+    #[test]
+    fn every_recall_reference_of_a_run_is_resolved_in_one_request_per_dataset() {
+        // Two plates, two recalls each. A request per recall against a free
+        // public service is not a reasonable way to ask, and the batching is
+        // invisible in the output, so nothing but this would catch its loss.
+        let mut source = source_with_an_open_recall();
+        source = source
+            .with(
+                rdw::datasets::VEHICLE,
+                "AA11BB",
+                vec![json!({
+                    "kenteken": "AA11BB",
+                    "openstaande_terugroepactie_indicator": "Ja",
+                })],
+            )
+            .with(
+                rdw::datasets::RECALL_STATUS,
+                "AA11BB",
+                vec![json!({
+                    "kenteken": "AA11BB",
+                    "referentiecode_rdw": "MGP240117",
+                    "code_status": "O",
+                })],
+            );
+
+        run(
+            &source,
+            &request(Command::Lookup {
+                plates: vec![plate("X99XXX"), plate("AA11BB")],
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(source.times_asked(rdw::datasets::RECALL_DETAIL), 1);
+        assert_eq!(source.times_asked(rdw::datasets::RECALL_RISK), 1);
+        assert_eq!(
+            source.requests(),
+            8,
+            "two registers, two fuel rows, two status rows, and one join per recall dataset"
+        );
+    }
+
+    #[test]
+    fn a_typo_plate_asked_about_recalls_is_not_found_rather_than_clean() {
+        // The same trap as `defects`: "no recalls" on a plate that does not
+        // exist reads as a clean bill of health.
+        let source = source_with_vehicle();
+        let err = run(
+            &source,
+            &request(Command::Recalls {
+                plates: vec![plate("XX99XX")],
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), "not_found");
+    }
+
+    #[test]
+    fn a_registered_vehicle_with_no_recalls_reports_no_rows_and_exits_zero() {
+        let source = source_with_vehicle();
+        let outcome = run(
+            &source,
+            &request(Command::Recalls {
+                plates: vec![plate("X99XXX")],
+            }),
+        )
+        .unwrap();
+        let v = envelope(&outcome);
+        assert_eq!(v["no_rows"], json!(["X99XXX"]));
+        assert_eq!(v["not_found"], json!([]));
+        assert_eq!(outcome.exit_code, 0);
+    }
+
+    #[test]
+    fn inspections_single_out_a_tachograph_finding_and_leave_a_routine_check_alone() {
+        // Tampering with a tachograph is someone interfering with the record of
+        // a professional driver's hours. It arrives in the same list as an
+        // ordinary APK and must not read like one.
+        let source = source_with_vehicle().with(
+            rdw::datasets::INSPECTIONS,
+            "X99XXX",
+            vec![
+                json!({
+                    "kenteken": "X99XXX",
+                    "meld_datum_door_keuringsinstantie": "20251010",
+                    "soort_melding_ki_omschrijving": "Manipulatie tacho",
+                    "soort_erkenning_omschrijving": "Tachograaf",
+                }),
+                json!({
+                    "kenteken": "X99XXX",
+                    "meld_datum_door_keuringsinstantie": "20250104",
+                    "soort_melding_ki_omschrijving": "Periodieke controle",
+                    "soort_erkenning_omschrijving": "APK lichte voertuigen",
+                    "vervaldatum_keuring": "20260104",
+                }),
+            ],
+        );
+
+        let v = envelope(
+            &run(
+                &source,
+                &request(Command::Inspections {
+                    plates: vec![plate("X99XXX")],
+                }),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(v["items"][0]["derived"]["alarm"], "tachograph_tampering");
+        assert_eq!(v["items"][0]["derived"]["date"], "2025-10-10");
+        assert_eq!(
+            v["items"][0]["derived"]["expiry"],
+            Value::Null,
+            "a tachograph finding produces no inspection expiry"
+        );
+        // The negative control: without it, an alarm on everything would pass.
+        assert_eq!(v["items"][1]["derived"]["alarm"], Value::Null);
+        assert_eq!(v["items"][1]["derived"]["expiry"], "2026-01-04");
+        assert_eq!(v["items"][1]["derived"]["kind"], "Periodieke controle");
     }
 
     #[test]

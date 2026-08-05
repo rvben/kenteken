@@ -30,8 +30,9 @@ const DEFAULT_CONCURRENCY: usize = 4;
     about = "Look up Dutch vehicle data by licence plate, from the RDW open data API.",
     long_about = "Look up Dutch vehicle data by licence plate, from the RDW open data API.\n\n\
                   `kenteken lookup X-99-XXX` shows the registration summary; `defects` lists \
-                  what an inspection found; `fuel` gives fuel and emissions; `raw` returns any \
-                  RDW dataset untouched.\n\n\
+                  what an inspection found; `fuel` gives fuel and emissions; `recalls` says \
+                  what a manufacturer recall is about and how it is fixed; `inspections` lists \
+                  what inspection bodies filed; `raw` returns any RDW dataset untouched.\n\n\
                   Plates are normalized, so X-99-XXX, x99xxx and X99XXX are the same plate. \
                   Every command takes several plates at once.\n\n\
                   Run `kenteken schema` for the machine-readable contract (clispec.dev)."
@@ -85,6 +86,18 @@ enum Command {
     },
     /// Fuel and emissions rows; one per fuel for a hybrid or bifuel vehicle.
     Fuel {
+        /// One or more plates, in any spelling: X-99-XXX, x99xxx, X99XXX.
+        #[arg(value_name = "PLATE", required = true)]
+        plates: Vec<String>,
+    },
+    /// Recalls, open ones first, each with its defect, hazard and repair.
+    Recalls {
+        /// One or more plates, in any spelling: X-99-XXX, x99xxx, X99XXX.
+        #[arg(value_name = "PLATE", required = true)]
+        plates: Vec<String>,
+    },
+    /// Notifications filed by inspection bodies, newest first.
+    Inspections {
         /// One or more plates, in any spelling: X-99-XXX, x99xxx, X99XXX.
         #[arg(value_name = "PLATE", required = true)]
         plates: Vec<String>,
@@ -188,6 +201,12 @@ fn dispatch(cli: &Cli) -> Result<ExitCode, KentekenError> {
             plates: parse_plates(plates)?,
         },
         Command::Fuel { plates } => Op::Fuel {
+            plates: parse_plates(plates)?,
+        },
+        Command::Recalls { plates } => Op::Recalls {
+            plates: parse_plates(plates)?,
+        },
+        Command::Inspections { plates } => Op::Inspections {
             plates: parse_plates(plates)?,
         },
         Command::Raw { dataset, plates } => Op::Raw {
@@ -466,7 +485,7 @@ mod tests {
     fn every_plate_argument_documents_itself() {
         // An empty description column in `--help` is the tell that a positional
         // argument was declared without one.
-        for sub in ["lookup", "defects", "fuel", "raw"] {
+        for sub in ["lookup", "defects", "fuel", "recalls", "inspections", "raw"] {
             let help = Cli::command()
                 .get_subcommands_mut()
                 .find(|c| c.get_name() == sub)

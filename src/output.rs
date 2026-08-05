@@ -87,6 +87,15 @@ fn text(envelope: &Value, command: &Command, style: Style) -> String {
             .join("\n\n"),
         Command::Defects { .. } => defect_table(items),
         Command::Fuel { .. } => fuel_table(items),
+        // Recalls are prose, not columns: a defect description and a repair
+        // instruction are sentences, and a table would either clip them or make
+        // a line thousands of characters wide.
+        Command::Recalls { .. } => items
+            .iter()
+            .map(|item| recall_card(item, style))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Command::Inspections { .. } => inspection_table(items, style),
     }
 }
 
@@ -109,6 +118,15 @@ fn empty_text(envelope: &Value, command: &Command) -> String {
             format!("{subject} is registered, with no defects recorded at inspection")
         }
         Command::Fuel { .. } => format!("{subject} is registered, with no fuel rows recorded"),
+        // "No recalls" is the answer people are hoping for, so it says what it
+        // means: RDW has never issued one that reaches this vehicle, which is
+        // not the same as one being open and undescribed.
+        Command::Recalls { .. } => {
+            format!("{subject} is registered, with no recalls on record, open or repaired")
+        }
+        Command::Inspections { .. } => {
+            format!("{subject} is registered, with no notifications from inspection bodies")
+        }
         _ => format!("{subject} is registered, with no rows in this dataset"),
     }
 }
@@ -137,22 +155,105 @@ fn b(d: &Value, key: &str) -> Option<bool> {
     d.get(key)?.as_bool()
 }
 
+/// Read a list of strings out of the derived block.
+fn list<'a>(d: &'a Value, key: &str) -> Vec<&'a str> {
+    d.get(key).map(string_list).unwrap_or_default()
+}
+
+/// The visible width a card is laid out for.
+///
+/// Fixed rather than read from the terminal, so the same lookup renders the same
+/// way into a pipe, a file, a narrow window and a wide one.
+const WRAP: usize = 78;
+
+/// Lay out a card: a title, then label and value pairs aligned in a column.
+///
+/// A value too wide for the card continues on the next line, indented to line up
+/// under itself, so a paragraph of RDW's prose stays readable beside its label.
+fn card(title: String, lines: Vec<(&str, String)>, style: Style) -> String {
+    let width = lines
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let indent = 2 + width + 3;
+    let mut out = title;
+    out.push('\n');
+    for (label, value) in lines {
+        let pad = " ".repeat(width - label.chars().count());
+        for (i, line) in wrap(&value, WRAP.saturating_sub(indent).max(24))
+            .into_iter()
+            .enumerate()
+        {
+            match i {
+                0 => out.push_str(&format!("  {}{pad}   {line}\n", style.dim(label))),
+                _ => out.push_str(&format!("{}{line}\n", " ".repeat(indent))),
+            }
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Break a value onto lines no wider than `width` visible characters.
+///
+/// Splits between words only, and returns a value that already fits untouched,
+/// so the deliberate spacing inside a short line survives.
+fn wrap(value: &str, width: usize) -> Vec<String> {
+    if visible_len(value) <= width {
+        return vec![value.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in value.split_whitespace() {
+        if !current.is_empty() && visible_len(&current) + 1 + visible_len(word) > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// How wide a string prints, ignoring the ANSI escapes that take no space.
+///
+/// Counting the escapes would make every coloured cell measure a dozen
+/// characters wider than it looks and pull the column out of line.
+fn visible_len(text: &str) -> usize {
+    let mut width = 0;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            width += 1;
+            continue;
+        }
+        for c in chars.by_ref() {
+            if c == 'm' {
+                break;
+            }
+        }
+    }
+    width
+}
+
 /// One vehicle, as the card `kenteken lookup` prints.
 fn vehicle_card(item: &Value, style: Style) -> String {
     let d = derived(item).expect("caller checked the derived block is present");
-    let mut out = String::new();
 
-    let title = [s(d, "make"), s(d, "model")]
+    let name = [s(d, "make"), s(d, "model")]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join(" ");
     let plate = s(d, "plate").unwrap_or("?");
-    out.push_str(&style.bold(&match title.is_empty() {
+    let title = style.bold(&match name.is_empty() {
         true => plate.to_string(),
-        false => format!("{plate}   {}", facts::title_case(&title)),
-    }));
-    out.push('\n');
+        false => format!("{plate}   {}", facts::title_case(&name)),
+    });
 
     let mut lines: Vec<(&str, String)> = Vec::new();
     push(&mut lines, "Type", kind_line(d));
@@ -167,6 +268,7 @@ fn vehicle_card(item: &Value, style: Style) -> String {
         "Registered since",
         s(d, "registered_since").map(str::to_string),
     );
+    push(&mut lines, "On the Dutch register", dutch_line(d));
     push(&mut lines, "Colour", colour_line(d));
     push(&mut lines, "Fuel", fuel_line(item));
     push(&mut lines, "Mass", mass_line(d));
@@ -178,6 +280,7 @@ fn vehicle_card(item: &Value, style: Style) -> String {
     push(&mut lines, "Odometer", odometer_line(d, style));
     push(&mut lines, "Insured (WAM)", insured_line(d, style));
     push(&mut lines, "Recall", recall_line(d, style));
+    push(&mut lines, "Recall hazard", recall_hazard_line(d));
     // Shown only when set. An exceptional flag that is off is not worth a line,
     // and the tri-state that keeps "off" apart from "not reported" is in the
     // derived block for anything that needs to tell them apart.
@@ -192,16 +295,77 @@ fn vehicle_card(item: &Value, style: Style) -> String {
         ),
     );
 
-    let width = lines
-        .iter()
-        .map(|(l, _)| l.chars().count())
-        .max()
-        .unwrap_or(0);
-    for (label, value) in lines {
-        let pad = " ".repeat(width - label.chars().count());
-        out.push_str(&format!("  {}{pad}   {value}\n", style.dim(label)));
+    card(title, lines, style)
+}
+
+/// One recall, as the card `kenteken recalls` prints.
+fn recall_card(item: &Value, style: Style) -> String {
+    let d = derived(item).expect("caller checked the derived block is present");
+    let heading = format!(
+        "{}   {}",
+        s(d, "plate").unwrap_or("?"),
+        s(d, "reference").unwrap_or("?")
+    );
+    let title = format!("{}   {}", style.bold(&heading), recall_status(d, style));
+
+    let mut lines: Vec<(&str, String)> = Vec::new();
+    push(&mut lines, "Defect", s(d, "defect").map(str::to_string));
+    push(&mut lines, "Category", s(d, "category").map(str::to_string));
+    let hazards = list(d, "hazards");
+    push(
+        &mut lines,
+        "Hazard",
+        (!hazards.is_empty()).then(|| style.alarm(&hazards.join("; "))),
+    );
+    push(
+        &mut lines,
+        "Consequences",
+        s(d, "consequences").map(str::to_string),
+    );
+    push(&mut lines, "Repair", s(d, "repair").map(str::to_string));
+    push(
+        &mut lines,
+        "Reported by",
+        s(d, "manufacturer").map(str::to_string),
+    );
+    push(&mut lines, "More information", contact_line(d));
+    push(&mut lines, "Published", published_line(d));
+    push(
+        &mut lines,
+        "Owners informed",
+        s(d, "owners_informed").map(str::to_string),
+    );
+    card(title, lines, style)
+}
+
+/// Whether this recall is still outstanding, said in words.
+fn recall_status(d: &Value, style: Style) -> String {
+    match b(d, "open") {
+        Some(true) => style.alarm("OPEN"),
+        Some(false) => "repaired".to_string(),
+        // RDW filed the recall against this vehicle but recorded no status. That
+        // is not a repair, and it must not read as one.
+        None => "status not reported".to_string(),
     }
-    out.trim_end().to_string()
+}
+
+fn contact_line(d: &Value) -> Option<String> {
+    let parts: Vec<&str> = [s(d, "more_info_url"), s(d, "more_info_phone")]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("  |  "))
+}
+
+fn published_line(d: &Value) -> Option<String> {
+    let published = s(d, "published")?;
+    Some(match n(d, "vehicles_affected") {
+        Some(count) => format!(
+            "{published}   {} vehicles in the action",
+            facts::thousands(count as i64)
+        ),
+        None => published.to_string(),
+    })
 }
 
 fn push(lines: &mut Vec<(&'static str, String)>, label: &'static str, value: Option<String>) {
@@ -258,6 +422,28 @@ fn since_line(d: &Value, date_key: &str, age_key: &str) -> Option<String> {
     })
 }
 
+/// When the vehicle first went onto the Dutch register, if that is not the day
+/// it was first admitted to the road.
+///
+/// A gap is the tell for a vehicle that was driven abroad first, which is worth
+/// seeing next to an odometer judgement. It is not proof of an import, though: a
+/// Dutch chassis bodied months after admission shows exactly the same gap, and
+/// among vehicles registered within a month of admission not one is flagged by
+/// RDW as having been registered abroad. So the line states the two facts and
+/// leaves the conclusion to the reader.
+fn dutch_line(d: &Value) -> Option<String> {
+    let date = s(d, "first_dutch_registration")?;
+    let lag = n(d, "dutch_registration_lag_days")? as i64;
+    if lag == 0 {
+        return None;
+    }
+    let direction = if lag > 0 { "after" } else { "before" };
+    Some(format!(
+        "{date}   {} {direction} first admission",
+        date::humanize_span(lag)
+    ))
+}
+
 fn colour_line(d: &Value) -> Option<String> {
     let first = facts::title_case(s(d, "colour")?);
     Some(match s(d, "second_colour") {
@@ -304,10 +490,19 @@ fn mass_line(d: &Value) -> Option<String> {
 }
 
 fn odometer_line(d: &Value, style: Style) -> Option<String> {
-    Some(match s(d, "odometer")? {
+    let verdict = s(d, "odometer")?;
+    let rendered = match verdict {
         "consistent" => "consistent".to_string(),
         "inconsistent" => style.alarm("INCONSISTENT"),
         other => other.replace('_', " "),
+    };
+    // RDW's own reason for the verdict, which is the interesting part when it
+    // declined to judge or found a jump. Left off a consistent history, where it
+    // only repeats that nothing is wrong.
+    let reason = s(d, "odometer_reason").filter(|_| verdict != "consistent");
+    Some(match reason {
+        Some(reason) => format!("{rendered}   {reason}"),
+        None => rendered,
     })
 }
 
@@ -318,11 +513,30 @@ fn insured_line(d: &Value, style: Style) -> Option<String> {
     })
 }
 
+/// The recall line on a vehicle card.
+///
+/// An open recall is the one thing on this card that asks the reader to act, so
+/// it says where the rest of it is rather than shouting two words and leaving no
+/// way to find out more.
 fn recall_line(d: &Value, style: Style) -> Option<String> {
-    Some(match b(d, "open_recall")? {
-        true => style.alarm("OPEN RECALL"),
-        false => "none outstanding".to_string(),
-    })
+    if !b(d, "open_recall")? {
+        return Some("none outstanding".to_string());
+    }
+    let mut parts = vec![style.alarm("OPEN RECALL")];
+    if let Some(plate) = s(d, "plate") {
+        parts.push(format!("see: kenteken recalls {plate}"));
+    }
+    Some(parts.join("   "))
+}
+
+/// What the vehicle's open recalls guard against, on a line of its own.
+///
+/// Kept off the line above because a hazard is a sentence: joined to a shouted
+/// status and a pointer, the whole thing outgrows the card, and wrapping it
+/// collapses the spacing that held the three apart into one run-on phrase.
+fn recall_hazard_line(d: &Value) -> Option<String> {
+    let hazards = list(d, "open_recall_hazards");
+    (!hazards.is_empty()).then(|| hazards.join("; "))
 }
 
 /// What a table cell shows when RDW reported nothing for it.
@@ -464,6 +678,58 @@ fn fuel_table(items: &[Value]) -> String {
     table(&cols, rows)
 }
 
+fn inspection_table(items: &[Value], style: Style) -> String {
+    let with_plate = many_plates(items);
+    let mut cols = Vec::new();
+    if with_plate {
+        cols.push(Col::left("PLATE"));
+    }
+    cols.extend([
+        Col::left("DATE"),
+        Col::left("NOTIFICATION"),
+        Col::left("FILED BY"),
+        // Not "APK until": the date expires the inspection that was filed, and a
+        // tachograph workshop inspects on its own two-yearly cycle. Labelling its
+        // row APK would hand a reader a roadworthiness date the vehicle has not
+        // got, from the one body that never issues one.
+        Col::left("VALID UNTIL"),
+    ]);
+
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|item| {
+            let mut row = Vec::new();
+            if with_plate {
+                row.push(dcell(item, "plate"));
+            }
+            row.extend([
+                dcell(item, "date"),
+                notification_cell(item, style),
+                dcell(item, "accreditation"),
+                dcell(item, "expiry"),
+            ]);
+            row
+        })
+        .collect();
+    table(&cols, rows)
+}
+
+/// What kind of notification this was, shouted when it is a tachograph finding.
+///
+/// Someone interfered with the instrument that records a professional driver's
+/// hours. It sits in a column of routine inspections, so it says so in English
+/// and in capitals; RDW's own wording stays in the row and the derived block.
+fn notification_cell(item: &Value, style: Style) -> String {
+    let Some(d) = derived(item) else {
+        return ABSENT.to_string();
+    };
+    match s(d, "alarm") {
+        Some("tachograph_tampering") => style.alarm("TACHOGRAPH TAMPERING"),
+        Some("tachograph_seal_broken") => style.alarm("TACHOGRAPH SEAL BROKEN"),
+        _ => dcell(item, "kind"),
+    }
+}
+
 fn dataset_table(items: &[Value]) -> String {
     let cols = [
         Col::left("NAME"),
@@ -513,14 +779,17 @@ fn table(cols: &[Col], rows: Vec<Vec<String>>) -> String {
     if cols.is_empty() {
         return String::new();
     }
+    // Measured by what prints, not by what is stored: a cell carrying a colour
+    // escape is a dozen bytes wider than it looks, and padding to that would
+    // knock every following column out of line.
     let widths: Vec<usize> = cols
         .iter()
         .enumerate()
         .map(|(i, c)| {
             rows.iter()
                 .filter_map(|r| r.get(i))
-                .map(|c| c.chars().count())
-                .chain(std::iter::once(c.head.chars().count()))
+                .map(|c| visible_len(c))
+                .chain(std::iter::once(visible_len(&c.head)))
                 .max()
                 .unwrap_or(0)
         })
@@ -543,7 +812,7 @@ fn pad_row(cells: impl Iterator<Item = String>, cols: &[Col], widths: &[usize]) 
         .map(|(i, cell)| {
             let right = cols.get(i).is_some_and(|c| c.right);
             let width = widths.get(i).copied().unwrap_or(0);
-            let pad = " ".repeat(width.saturating_sub(cell.chars().count()));
+            let pad = " ".repeat(width.saturating_sub(visible_len(cell)));
             if right {
                 return format!("{pad}{cell}");
             }
@@ -599,6 +868,40 @@ mod tests {
 
     fn fuel_envelope(items: Value) -> Value {
         with_derived(items, |item, _| facts::fuel(item))
+    }
+
+    fn recall_envelope(items: Value) -> Value {
+        with_derived(items, |item, _| facts::recall(item))
+    }
+
+    fn inspection_envelope(items: Value) -> Value {
+        with_derived(items, |item, _| facts::inspection(item))
+    }
+
+    fn recalls() -> Command {
+        Command::Recalls { plates: vec![] }
+    }
+
+    fn inspections() -> Command {
+        Command::Inspections { plates: vec![] }
+    }
+
+    /// The same text with the escapes removed, for measuring what a reader sees.
+    fn stripped(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        }
+        out
     }
 
     fn lookup() -> Command {
@@ -1190,5 +1493,368 @@ mod tests {
             .map(|l| l.rfind(char::is_whitespace).unwrap_or(0))
             .collect();
         assert_eq!(code_columns.len(), 2, "two rows, got:\n{rendered}");
+    }
+
+    /// One status row with the two reference-keyed datasets joined onto it, the
+    /// shape `recalls` renders.
+    fn open_recall_row() -> Value {
+        json!({
+            "kenteken": "X99XXX",
+            "referentiecode_rdw": "MGP230291",
+            "code_status": "O",
+            "status": "Openstaand",
+            "recall": {
+                "omschrijving_defect": "De remleiding kan langs de wielkast schuren.",
+                "categorie_defect": "Remsysteem",
+                "materi_le_gevolgen": "Remvloeistofverlies.",
+                "beschrijving_van_het_herstel": "De remleiding wordt anders geleid en zo nodig vervangen.",
+                "meldende_producent_distributeur": "Iveco Nederland B.V.",
+                "meer_informatie_op_internet": "https://example.com/recall",
+                "meer_informatie_via_telefoonnummer": "0800-1234567",
+                "publicatiedatum_rdw": "20230417",
+                "datum_eigenaren_ge_nformeerd": "20230502",
+                "totaal_aantal_voertuigen_terugroepactie": "1834",
+            },
+            "risks": [{"mogelijk_gevaar": "Verminderde remwerking"}],
+        })
+    }
+
+    /// The same text with every run of whitespace collapsed to one space.
+    ///
+    /// Wrapping inserts newlines and indentation between words, so this is what
+    /// lets a test assert that a paragraph survived it whole.
+    fn collapsed(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn a_recall_card_says_what_is_wrong_what_it_risks_and_how_it_is_fixed() {
+        let env = recall_envelope(json!([open_recall_row()]));
+        let rendered = plain(&env, &recalls());
+        assert!(rendered.starts_with("X-99-XXX   MGP230291"), "{rendered}");
+        assert!(rendered.contains("OPEN"), "rendered:\n{rendered}");
+        for expected in [
+            "De remleiding kan langs de wielkast schuren.",
+            "Remsysteem",
+            "Verminderde remwerking",
+            "De remleiding wordt anders geleid en zo nodig vervangen.",
+            "Iveco Nederland B.V.",
+            "https://example.com/recall",
+            "0800-1234567",
+            "2023-04-17",
+            "1,834 vehicles in the action",
+        ] {
+            assert!(
+                collapsed(&rendered).contains(expected),
+                "missing {expected:?}:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repaired_recall_reads_as_repaired_and_an_unstated_one_does_not() {
+        let mut repaired = open_recall_row();
+        repaired["code_status"] = json!("P");
+        repaired["status"] = json!("Hersteld");
+        let rendered = plain(&recall_envelope(json!([repaired.clone()])), &recalls());
+        assert!(rendered.contains("repaired"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("OPEN"), "rendered:\n{rendered}");
+
+        // RDW filed the recall against the vehicle and left the status column
+        // out. That is not a repair, and the card must not let it read as one.
+        let mut silent = repaired;
+        silent.as_object_mut().unwrap().remove("code_status");
+        let rendered = plain(&recall_envelope(json!([silent])), &recalls());
+        assert!(
+            rendered.contains("status not reported"),
+            "rendered:\n{rendered}"
+        );
+        assert!(!rendered.contains("repaired"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn a_recall_rdw_published_no_detail_for_still_names_itself() {
+        // A status row is allowed to reference a recall the detail dataset has
+        // nothing for. Rendering nothing at all would hide an open recall.
+        let env = recall_envelope(json!([{
+            "kenteken": "X99XXX",
+            "referentiecode_rdw": "MGP230085",
+            "code_status": "O",
+        }]));
+        let rendered = plain(&env, &recalls());
+        assert!(rendered.contains("MGP230085"), "rendered:\n{rendered}");
+        assert!(rendered.contains("OPEN"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Defect"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Repair"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn the_hazard_of_an_open_recall_is_shouted_in_colour_and_in_plain() {
+        let env = recall_envelope(json!([open_recall_row()]));
+        let coloured = render(&env, &recalls(), OutputFormat::Text, Style::Colour);
+        assert!(coloured.contains("OPEN"), "colour dropped the status");
+        assert!(
+            coloured.contains("Verminderde remwerking"),
+            "colour dropped the hazard:\n{coloured}"
+        );
+        assert!(coloured.contains('\u{1b}'), "colour emitted no escapes");
+        assert!(!plain(&env, &recalls()).contains('\u{1b}'));
+    }
+
+    #[test]
+    fn a_paragraph_of_rdw_prose_wraps_under_its_label_and_stays_whole() {
+        let repair = "Het voertuig wordt bij een erkende werkplaats gecontroleerd \
+             en waar nodig wordt de bedrading van de brandstofpomp opnieuw \
+             gerouteerd, voorzien van een beschermhoes en met een nieuwe \
+             klemverbinding vastgezet zodat schuren niet meer kan optreden.";
+        let mut row = open_recall_row();
+        row["recall"]["beschrijving_van_het_herstel"] = json!(repair);
+        let rendered = plain(&recall_envelope(json!([row])), &recalls());
+
+        assert!(
+            rendered.lines().count() > 9,
+            "the paragraph was not wrapped at all:\n{rendered}"
+        );
+        for line in rendered.lines() {
+            assert!(
+                visible_len(line) <= WRAP,
+                "line runs past the card: {line:?}"
+            );
+        }
+        // Splitting only between words means the sentence is still there, and
+        // reading it back is the only check that proves no word was broken.
+        assert!(
+            collapsed(&rendered).contains(&collapsed(repair)),
+            "the repair instruction did not survive wrapping:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_value_that_already_fits_is_returned_untouched() {
+        // The card lines up columns with runs of spaces. Reflowing a line that
+        // fits would collapse them and pull the value out of its column.
+        let spaced = "2020-01-01   EXPIRED 2 years ago";
+        assert_eq!(wrap(spaced, 78), vec![spaced.to_string()]);
+    }
+
+    #[test]
+    fn width_is_measured_by_what_prints_not_by_what_is_stored() {
+        let shouted = Style::Colour.alarm("OPEN");
+        assert!(shouted.chars().count() > 4, "the escapes are really there");
+        assert_eq!(visible_len(&shouted), 4);
+        assert_eq!(visible_len("OPEN"), 4);
+    }
+
+    #[test]
+    fn a_tachograph_finding_is_shouted_and_a_routine_check_is_left_alone() {
+        for (dutch, shouted) in [
+            ("manipulatie tacho", "TACHOGRAPH TAMPERING"),
+            ("zegelverbreking tacho", "TACHOGRAPH SEAL BROKEN"),
+        ] {
+            let env = inspection_envelope(json!([
+                {
+                    "kenteken": "X99XXX",
+                    "meld_datum_door_keuringsinstantie": "20250102",
+                    "soort_melding_ki_omschrijving": dutch,
+                    "soort_erkenning_omschrijving": "Tachograafwerkplaats",
+                },
+                {
+                    "kenteken": "X99XXX",
+                    "meld_datum_door_keuringsinstantie": "20250304",
+                    "soort_melding_ki_omschrijving": "periodieke controle",
+                    "soort_erkenning_omschrijving": "APK lichte voertuigen",
+                    "vervaldatum_keuring": "20260304",
+                },
+            ]));
+            let rendered = plain(&env, &inspections());
+            assert!(rendered.contains(shouted), "rendered:\n{rendered}");
+            assert!(rendered.contains("2025-01-02"), "rendered:\n{rendered}");
+            // The negative control: a table that shouted every row would pass
+            // the assertion above and tell a reader nothing.
+            let routine = rendered
+                .lines()
+                .find(|l| l.contains("2025-03-04"))
+                .expect("the routine row is rendered");
+            assert!(
+                routine.contains("periodieke controle"),
+                "routine row: {routine:?}"
+            );
+            assert!(!routine.contains("TACHOGRAPH"), "routine row: {routine:?}");
+            assert!(routine.contains("2026-03-04"), "routine row: {routine:?}");
+        }
+    }
+
+    #[test]
+    fn an_expiry_column_does_not_call_a_tachograph_check_an_apk() {
+        // Two bodies file on one day and set different expiries: the APK station
+        // a year out, the tachograph workshop two. The date expires whichever
+        // inspection was filed, so the column cannot promise an APK.
+        let env = inspection_envelope(json!([
+            {
+                "kenteken": "X99XXX",
+                "meld_datum_door_keuringsinstantie": "20240229",
+                "soort_melding_ki_omschrijving": "periodieke controle",
+                "soort_erkenning_omschrijving": "Controleapparaten",
+                "vervaldatum_keuring": "20260301",
+            },
+            {
+                "kenteken": "X99XXX",
+                "meld_datum_door_keuringsinstantie": "20240229",
+                "soort_melding_ki_omschrijving": "periodieke controle",
+                "soort_erkenning_omschrijving": "APK Zware voertuigen",
+                "vervaldatum_keuring": "20250301",
+            },
+        ]));
+        let rendered = plain(&env, &inspections());
+        let header = rendered.lines().next().expect("the table has a header");
+        assert!(header.contains("VALID UNTIL"), "header: {header:?}");
+        assert!(!header.contains("APK"), "header: {header:?}");
+        let tacho = rendered
+            .lines()
+            .find(|l| l.contains("Controleapparaten"))
+            .expect("the tachograph row is rendered");
+        assert!(tacho.contains("2026-03-01"), "tachograph row: {tacho:?}");
+    }
+
+    #[test]
+    fn a_shouted_notification_does_not_pull_its_table_out_of_line() {
+        // The alarm cell carries a dozen bytes of escape that take no width.
+        // Padding to the stored length would push every following column of
+        // that one row to the right and leave the table unreadable.
+        let env = inspection_envelope(json!([
+            {
+                "kenteken": "X99XXX",
+                "meld_datum_door_keuringsinstantie": "20250102",
+                "soort_melding_ki_omschrijving": "manipulatie tacho",
+                "soort_erkenning_omschrijving": "Tachograafwerkplaats",
+            },
+            {
+                "kenteken": "X99XXX",
+                "meld_datum_door_keuringsinstantie": "20250304",
+                "soort_melding_ki_omschrijving": "periodieke controle",
+                "soort_erkenning_omschrijving": "APK lichte voertuigen",
+                "vervaldatum_keuring": "20260304",
+            },
+        ]));
+        let rendered = render(&env, &inspections(), OutputFormat::Text, Style::Colour);
+        let visible = stripped(&rendered);
+        let columns: Vec<usize> = visible
+            .lines()
+            .map(|line| {
+                line.find("FILED BY")
+                    .or_else(|| line.find("Tachograafwerkplaats"))
+                    .or_else(|| line.find("APK lichte"))
+                    .unwrap_or_else(|| panic!("no accreditation cell in {line:?}"))
+            })
+            .collect();
+        assert_eq!(columns.len(), 3, "as seen:\n{visible}");
+        assert!(
+            columns.windows(2).all(|w| w[0] == w[1]),
+            "the coloured row is out of line at {columns:?}:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn a_registered_plate_with_no_recalls_or_notifications_says_which_it_is() {
+        let mut env = recall_envelope(json!([]));
+        env["no_rows"] = json!(["X-99-XXX"]);
+        let rendered = plain(&env, &recalls());
+        assert!(rendered.contains("registered"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("no recalls on record, open or repaired"),
+            "rendered: {rendered}"
+        );
+
+        let rendered = plain(&env, &inspections());
+        assert!(
+            rendered.contains("no notifications from inspection bodies"),
+            "rendered: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_dutch_register_line_appears_only_when_it_differs_from_admission() {
+        let same = envelope(json!([{
+            "kenteken": "X99XXX",
+            "datum_eerste_toelating": "20190301",
+            "datum_eerste_tenaamstelling_in_nederland": "20190301",
+        }]));
+        let rendered = plain(&same, &lookup());
+        assert!(
+            !rendered.contains("Dutch register"),
+            "a line saying the two dates are the same is noise:\n{rendered}"
+        );
+
+        let later = envelope(json!([{
+            "kenteken": "X99XXX",
+            "datum_eerste_toelating": "20190301",
+            "datum_eerste_tenaamstelling_in_nederland": "20220615",
+        }]));
+        let rendered = plain(&later, &lookup());
+        assert!(rendered.contains("2022-06-15"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("after first admission"),
+            "rendered:\n{rendered}"
+        );
+        // The gap is a fact about two dates. Calling it an import would be a
+        // verdict RDW never published.
+        assert!(!rendered.contains("import"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn an_odometer_verdict_carries_rdws_reason_except_when_all_is_well() {
+        let flagged = envelope(json!([{
+            "kenteken": "X99XXX",
+            "tellerstandoordeel": "Onlogisch",
+            "code_toelichting_tellerstandoordeel": "04",
+        }]));
+        let rendered = plain(&flagged, &lookup());
+        assert!(rendered.contains("INCONSISTENT"), "rendered:\n{rendered}");
+        assert!(
+            rendered.contains("teruggedraaid"),
+            "the reason is the interesting part:\n{rendered}"
+        );
+
+        // A reason for a clean history only repeats that nothing is wrong, in
+        // three lines of Dutch. The verdict alone is the answer.
+        let clean = envelope(json!([{
+            "kenteken": "X99XXX",
+            "tellerstandoordeel": "Logisch",
+            "code_toelichting_tellerstandoordeel": "00",
+        }]));
+        let rendered = plain(&clean, &lookup());
+        assert!(rendered.contains("consistent"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("verklaarbaar"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn an_open_recall_on_a_vehicle_card_says_what_it_is_and_where_to_read_it() {
+        // Two shouted words with no way to find out more is a warning a reader
+        // cannot act on.
+        let env = envelope(json!([{
+            "kenteken": "X99XXX",
+            "openstaande_terugroepactie_indicator": "Ja",
+            "recalls": [open_recall_row()],
+        }]));
+        let rendered = plain(&env, &lookup());
+        let status = rendered
+            .lines()
+            .find(|l| l.contains("OPEN RECALL"))
+            .expect("the recall line is rendered");
+        // The pointer stays on the shouted line, spacing and all. A hazard
+        // joined on here would push the line past the card, and wrapping it
+        // would collapse that spacing into one run-on phrase.
+        assert!(
+            status.contains("OPEN RECALL   see: kenteken recalls X-99-XXX"),
+            "recall line was {status:?}"
+        );
+        let hazard = rendered
+            .lines()
+            .find(|l| l.contains("Recall hazard"))
+            .expect("the hazard has a line of its own");
+        assert!(
+            hazard.contains("Verminderde remwerking"),
+            "hazard line was {hazard:?}"
+        );
     }
 }

@@ -30,6 +30,14 @@ pub const FETCH_CAP: usize = 5_000;
 /// Environment variable holding an optional Socrata app token.
 pub const APP_TOKEN_ENV: &str = "RDW_APP_TOKEN";
 
+/// How many values one `$where ... in (...)` filter carries.
+///
+/// A recall reference is nine characters, so this keeps the query string well
+/// inside what any HTTP stack will accept while resolving the references of a
+/// realistic run in a single request. More values than this are split across
+/// consecutive requests rather than silently dropped.
+const VALUE_CHUNK: usize = 200;
+
 /// Fetches rows over HTTPS from the live RDW API.
 pub struct HttpSource {
     client: reqwest::blocking::Client,
@@ -91,16 +99,56 @@ impl RdwSource for HttpSource {
             });
         }
 
-        // `$order` is not optional. Socrata leaves an unsorted result's order
-        // undefined, and two identical requests to this endpoint were observed
-        // returning the same rows in different orders, which would make
-        // `--limit` an arbitrary subset and `--offset` skip or repeat rows.
+        self.fetch(dataset, &[("kenteken", plate.as_str().to_string())])
+    }
+
+    fn rows_for_values(
+        &self,
+        dataset: &Dataset,
+        column: &str,
+        values: &[String],
+    ) -> Result<Vec<Row>, KentekenError> {
+        // No values means nothing to resolve. Returning early is not an
+        // optimisation: `in ()` is a SoQL syntax error, and a filter dropped
+        // instead would fetch the entire dataset.
+        let mut wanted: Vec<&String> = values.iter().collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut rows = Vec::new();
+        for batch in wanted.chunks(VALUE_CHUNK) {
+            let list: Vec<String> = batch.iter().map(|v| quoted(v)).collect();
+            let filter = format!("{column} in ({})", list.join(","));
+            rows.extend(self.fetch(dataset, &[("$where", filter)])?);
+        }
+        Ok(rows)
+    }
+}
+
+impl HttpSource {
+    /// Issue one query against a dataset, with the tool's standing parameters.
+    ///
+    /// `$order` is not optional. Socrata leaves an unsorted result's order
+    /// undefined, and two identical requests to this endpoint were observed
+    /// returning the same rows in different orders, which would make `--limit`
+    /// an arbitrary subset and `--offset` skip or repeat rows.
+    fn fetch(
+        &self,
+        dataset: &Dataset,
+        filter: &[(&str, String)],
+    ) -> Result<Vec<Row>, KentekenError> {
         let url = format!("{}/{}.json", self.base_url, dataset.id);
-        let mut request = self.client.get(&url).query(&[
-            ("kenteken", plate.as_str()),
-            ("$limit", &FETCH_CAP.to_string()),
-            ("$order", dataset.order),
-        ]);
+        let mut request = self
+            .client
+            .get(&url)
+            .query(&[
+                ("$limit", FETCH_CAP.to_string()),
+                ("$order", dataset.order.to_string()),
+            ])
+            .query(filter);
         if let Some(token) = &self.app_token {
             request = request.header("X-App-Token", token);
         }
@@ -121,9 +169,7 @@ impl RdwSource for HttpSource {
             message: format!("unexpected response from dataset {}: {e}", dataset.id),
         })
     }
-}
 
-impl HttpSource {
     /// Classify a reqwest transport failure into the right error kind.
     fn transport_error(&self, e: reqwest::Error) -> KentekenError {
         if e.is_timeout() {
@@ -159,6 +205,16 @@ impl HttpSource {
             },
         }
     }
+}
+
+/// Wrap a value in the single quotes SoQL expects, escaping any it contains.
+///
+/// SoQL escapes a quote by doubling it. The values this builds a filter from are
+/// RDW's own reference codes rather than user input, but a filter that changes
+/// meaning because a datum contains an apostrophe is a bug whichever end the
+/// datum came from.
+fn quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 /// Treat an empty or whitespace-only token as unset.
@@ -252,6 +308,28 @@ mod tests {
             line.contains(&FETCH_CAP.to_string()),
             "no row cap, so Socrata's own default silently truncates: {line}"
         );
+    }
+
+    #[test]
+    fn quoting_doubles_a_quote_rather_than_ending_the_literal() {
+        assert_eq!(quoted("MGP230085"), "'MGP230085'");
+        assert_eq!(quoted("O'Brien"), "'O''Brien'");
+        // The shape that would otherwise turn one filter into two terms.
+        assert_eq!(quoted("a') or ('1'='1"), "'a'') or (''1''=''1'");
+    }
+
+    #[test]
+    fn resolving_no_values_makes_no_request_at_all() {
+        // An unroutable base URL: a request here would fail with a network
+        // error rather than return no rows. `in ()` is a SoQL syntax error, and
+        // a dropped filter would fetch the whole dataset, so neither an error
+        // nor rows is the right answer.
+        let source = HttpSource::build("http://127.0.0.1:1", Duration::from_millis(50), None)
+            .expect("client builds");
+        let rows = source
+            .rows_for_values(&datasets::RECALL_RISK, "referentiecode_rdw", &[])
+            .expect("no values is not a failure");
+        assert!(rows.is_empty(), "got {rows:?}");
     }
 
     #[test]

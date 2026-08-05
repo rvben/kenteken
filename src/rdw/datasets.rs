@@ -72,12 +72,67 @@ pub const DEFECT_CODES: Dataset = Dataset {
     order: "gebrek_identificatie",
 };
 
+/// Which recalls apply to a plate, open and already repaired.
+///
+/// Sorting on `code_status` first is a deliberate choice rather than a
+/// convenience: the column holds exactly two values, `O` for an open recall and
+/// `P` for one the manufacturer has reported repaired, so ascending order puts
+/// the open ones first and a page cut short by `--limit` cannot hide one.
+pub const RECALL_STATUS: Dataset = Dataset {
+    id: "t49b-isb7",
+    name: "terugroepactie-status",
+    description: "Recalls per vehicle: open, or reported repaired by the manufacturer.",
+    plate_keyed: true,
+    order: "code_status, referentiecode_rdw",
+};
+
+/// What a recall is about, keyed by RDW's reference code rather than by plate.
+pub const RECALL_DETAIL: Dataset = Dataset {
+    id: "j9yg-7rg9",
+    name: "terugroepactie",
+    description: "Recall detail: the defect, its consequences, the repair and who to contact.",
+    plate_keyed: false,
+    order: "referentiecode_rdw",
+};
+
+/// The hazard a recall guards against, keyed by the same reference code.
+pub const RECALL_RISK: Dataset = Dataset {
+    id: "9ihi-jgpf",
+    name: "terugroepactie-risico",
+    description: "The hazard a recall guards against, in RDW's own words.",
+    plate_keyed: false,
+    order: "referentiecode_rdw, code_mogelijk_gevaar",
+};
+
+/// Everything an inspection body has filed against a plate.
+pub const INSPECTIONS: Dataset = Dataset {
+    id: "sgfe-77wx",
+    name: "meldingen",
+    description: "Notifications filed by inspection bodies, including tachograph tampering.",
+    plate_keyed: true,
+    order: "meld_datum_door_keuringsinstantie DESC, meld_tijd_door_keuringsinstantie DESC, soort_melding_ki_omschrijving",
+};
+
+/// The odometer-judgement explanations, embedded at compile time.
+pub const ODOMETER_REASONS: Dataset = Dataset {
+    id: "jqs4-4kvw",
+    name: "tellerstandtoelichting",
+    description: "Why RDW judged an odometer as it did. Embedded in this binary; no request needed.",
+    plate_keyed: false,
+    order: "code_toelichting_tellerstandoordeel",
+};
+
 /// Every dataset `kenteken raw` accepts by name, and `kenteken datasets` lists.
 pub const KNOWN: &[Dataset] = &[
     VEHICLE,
     FUEL,
     DEFECTS,
     DEFECT_CODES,
+    RECALL_STATUS,
+    RECALL_DETAIL,
+    RECALL_RISK,
+    INSPECTIONS,
+    ODOMETER_REASONS,
     Dataset {
         id: "3huj-srit",
         name: "assen",
@@ -204,7 +259,7 @@ mod tests {
 
     #[test]
     fn the_datasets_the_commands_depend_on_are_plate_keyed() {
-        for d in [VEHICLE, FUEL, DEFECTS] {
+        for d in [VEHICLE, FUEL, DEFECTS, RECALL_STATUS, INSPECTIONS] {
             assert!(d.plate_keyed, "{} must be queryable by plate", d.name);
         }
     }
@@ -248,6 +303,18 @@ mod tests {
                 ],
             ),
             ("hx2c-gt7k", &["gebrek_identificatie"]),
+            ("t49b-isb7", &["code_status", "referentiecode_rdw"]),
+            ("j9yg-7rg9", &["referentiecode_rdw"]),
+            ("9ihi-jgpf", &["referentiecode_rdw", "code_mogelijk_gevaar"]),
+            (
+                "sgfe-77wx",
+                &[
+                    "meld_datum_door_keuringsinstantie",
+                    "meld_tijd_door_keuringsinstantie",
+                    "soort_melding_ki_omschrijving",
+                ],
+            ),
+            ("jqs4-4kvw", &["code_toelichting_tellerstandoordeel"]),
             ("3huj-srit", &["as_nummer"]),
             ("vezc-m2t6", &["carrosserie_volgnummer"]),
             (
@@ -304,8 +371,43 @@ mod tests {
     }
 
     #[test]
+    fn the_recall_order_puts_open_recalls_first() {
+        // `code_status` holds `O` (open) and `P` (repair reported), and nothing
+        // else, so ascending order lists the open ones first. A page cut short
+        // by `--limit` must never drop an open recall to show a repaired one.
+        assert!(
+            RECALL_STATUS.order.starts_with("code_status"),
+            "recall order is {:?}",
+            RECALL_STATUS.order
+        );
+    }
+
+    #[test]
+    fn the_reference_keyed_recall_datasets_are_not_plate_keyed() {
+        // Both are reached through a recall's reference code. Querying either by
+        // kenteken is an HTTP 400, and the flag is what refuses that locally.
+        for d in [RECALL_DETAIL, RECALL_RISK] {
+            assert!(
+                !d.plate_keyed,
+                "{} would be queried by plate and get an HTTP 400",
+                d.name
+            );
+        }
+    }
+
+    #[test]
     fn named_constants_are_in_the_registry() {
-        for d in [VEHICLE, FUEL, DEFECTS, DEFECT_CODES] {
+        for d in [
+            VEHICLE,
+            FUEL,
+            DEFECTS,
+            DEFECT_CODES,
+            RECALL_STATUS,
+            RECALL_DETAIL,
+            RECALL_RISK,
+            INSPECTIONS,
+            ODOMETER_REASONS,
+        ] {
             assert!(KNOWN.contains(&d), "{} missing from KNOWN", d.name);
         }
     }

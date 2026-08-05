@@ -220,6 +220,89 @@ fn the_request_targets_the_datasets_resource_and_filters_by_plate() {
 }
 
 #[test]
+fn resolving_references_sends_one_filter_holding_every_one_of_them() {
+    // The reference-keyed recall datasets are not queryable by plate, so this
+    // `$where` is the whole join. A malformed one would come back empty, and an
+    // empty result reads as "this recall has no detail" rather than as a bug.
+    let server = FakeRdw::ok("[]");
+    let rows = server
+        .source(SHORT)
+        .rows_for_values(
+            &datasets::RECALL_DETAIL,
+            "referentiecode_rdw",
+            &[
+                "MGP230291".into(),
+                "MGP230085".into(),
+                // Repeated because two plates of one run routinely carry the
+                // same recall, and asking for it twice would waste a request.
+                "MGP230291".into(),
+            ],
+        )
+        .expect("rows parse");
+    assert!(rows.is_empty());
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "one request resolves the whole run");
+    let request = &requests[0];
+    assert!(
+        request
+            .target
+            .starts_with(&format!("/{}.json", datasets::RECALL_DETAIL.id)),
+        "target was {}",
+        request.target
+    );
+    assert_eq!(
+        request.query("$where").as_deref(),
+        Some("referentiecode_rdw in ('MGP230085','MGP230291')")
+    );
+    assert_eq!(
+        request.query("$order").as_deref(),
+        Some(datasets::RECALL_DETAIL.order),
+        "an unordered page makes --limit an arbitrary subset"
+    );
+    assert_eq!(request.query("kenteken"), None, "this dataset has no plate");
+}
+
+#[test]
+fn more_references_than_one_filter_holds_are_split_rather_than_dropped() {
+    let server = FakeRdw::ok("[]");
+    let references: Vec<String> = (0..250).map(|i| format!("MGP{i:06}")).collect();
+    server
+        .source(SHORT)
+        .rows_for_values(&datasets::RECALL_RISK, "referentiecode_rdw", &references)
+        .expect("rows parse");
+
+    let requests = server.requests();
+    assert!(requests.len() > 1, "250 references fitted in one filter?");
+    let filters: String = requests
+        .iter()
+        .map(|r| r.query("$where").unwrap_or_default())
+        .collect();
+    for reference in &references {
+        assert!(
+            filters.contains(reference.as_str()),
+            "{reference} was never asked for"
+        );
+    }
+}
+
+#[test]
+fn a_value_carrying_a_quote_cannot_change_the_filter_it_sits_in() {
+    // RDW's own reference codes, not user input. A filter that changes meaning
+    // because a datum contains an apostrophe is still a bug.
+    let server = FakeRdw::ok("[]");
+    let _ = server.source(SHORT).rows_for_values(
+        &datasets::RECALL_DETAIL,
+        "referentiecode_rdw",
+        &["MGP'230291".into()],
+    );
+    assert_eq!(
+        server.requests()[0].query("$where").as_deref(),
+        Some("referentiecode_rdw in ('MGP''230291')")
+    );
+}
+
+#[test]
 fn an_explicit_limit_is_always_sent_so_socratas_default_cannot_truncate() {
     // Socrata caps an unqualified query at 1000 rows silently. Asking for a
     // bound explicitly is what makes a short result mean "that is all there is".

@@ -1,4 +1,4 @@
-.PHONY: build release test lint fmt check conformance clean install update-deps update-gebreken release-patch release-minor release-major
+.PHONY: build release test lint fmt check conformance clean install update-deps update-gebreken update-tellerstand release-patch release-minor release-major
 
 build:
 	cargo build
@@ -32,6 +32,10 @@ conformance: release
 # the change lands as a reviewable diff rather than a silent behaviour change.
 update-gebreken:
 	./scripts/update-gebreken.sh
+
+# Refresh the embedded odometer-judgement explanations from RDW, the same way.
+update-tellerstand:
+	./scripts/update-tellerstand.sh
 
 clean:
 	cargo clean

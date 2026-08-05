@@ -59,6 +59,8 @@ fn schema_declares_the_expected_shape() {
         "lookup",
         "defects",
         "fuel",
+        "recalls",
+        "inspections",
         "raw",
         "datasets",
         "schema",
