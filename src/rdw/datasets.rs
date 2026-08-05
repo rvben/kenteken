@@ -13,7 +13,9 @@
 //! type: `meld_datum_door_keuringsinstantie` is a number, so `DESC` on it is
 //! genuinely newest-first rather than lexical.
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
+
+use crate::text::{Lang, Phrase, p};
 
 /// One RDW dataset: its Socrata four-by-four id and what it holds.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -22,8 +24,13 @@ pub struct Dataset {
     pub id: &'static str,
     /// Short name used by this tool and shown in `kenteken datasets`.
     pub name: &'static str,
-    /// What the dataset contains.
-    pub description: &'static str,
+    /// What the dataset contains, in both languages the text speaks.
+    ///
+    /// Serialized as English, because the item is the machine contract and
+    /// `--lang` cannot move it. The text renderer resolves the dataset again and
+    /// asks for the reader's language.
+    #[serde(serialize_with = "en_only")]
+    pub description: Phrase,
     /// Whether rows can be selected by `kenteken`.
     pub plate_keyed: bool,
     /// SoQL `$order` clause making the row order total and repeatable.
@@ -36,11 +43,23 @@ pub struct Dataset {
     pub order: &'static str,
 }
 
+/// Serialize a description as its English string.
+///
+/// A plain JSON string, so the item's shape is what every consumer of this tool
+/// has parsed since the field existed. English because `json`, `yaml` and `ndjson`
+/// are the contract, and a contract that changes language with a flag is not one.
+fn en_only<S: Serializer>(phrase: &Phrase, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(Lang::En.say(phrase))
+}
+
 /// The main vehicle register: one row per plate, 62 columns.
 pub const VEHICLE: Dataset = Dataset {
     id: "m9d7-ebf2",
     name: "voertuigen",
-    description: "Registered vehicles: make, model, APK expiry, masses, prices, indicators.",
+    description: p(
+        "Registered vehicles: make, model, APK expiry, masses, prices, indicators.",
+        "Geregistreerde voertuigen: merk, model, vervaldatum APK, massa's, prijzen, indicatoren.",
+    ),
     plate_keyed: true,
     order: "kenteken",
 };
@@ -49,7 +68,10 @@ pub const VEHICLE: Dataset = Dataset {
 pub const FUEL: Dataset = Dataset {
     id: "8ys7-d773",
     name: "brandstof",
-    description: "Fuel and emissions: fuel type, power, CO2, particulates, noise levels.",
+    description: p(
+        "Fuel and emissions: fuel type, power, CO2, particulates, noise levels.",
+        "Brandstof en emissies: brandstofsoort, vermogen, CO2, fijnstof, geluidsniveaus.",
+    ),
     plate_keyed: true,
     order: "brandstof_volgnummer",
 };
@@ -58,7 +80,10 @@ pub const FUEL: Dataset = Dataset {
 pub const DEFECTS: Dataset = Dataset {
     id: "a34c-vvps",
     name: "gebreken",
-    description: "Defects found at APK inspections, by defect code and inspection date.",
+    description: p(
+        "Defects found at APK inspections, by defect code and inspection date.",
+        "Gebreken vastgesteld bij APK-keuringen, per gebrekcode en keuringsdatum.",
+    ),
     plate_keyed: true,
     order: "meld_datum_door_keuringsinstantie DESC, meld_tijd_door_keuringsinstantie DESC, gebrek_identificatie",
 };
@@ -67,7 +92,10 @@ pub const DEFECTS: Dataset = Dataset {
 pub const DEFECT_CODES: Dataset = Dataset {
     id: "hx2c-gt7k",
     name: "gebrekcodes",
-    description: "Defect code descriptions. Embedded in this binary; no request needed.",
+    description: p(
+        "Defect code descriptions. Embedded in this binary; no request needed.",
+        "Omschrijvingen van gebrekcodes. Ingebouwd, dus geen verzoek nodig.",
+    ),
     plate_keyed: false,
     order: "gebrek_identificatie",
 };
@@ -81,7 +109,10 @@ pub const DEFECT_CODES: Dataset = Dataset {
 pub const RECALL_STATUS: Dataset = Dataset {
     id: "t49b-isb7",
     name: "terugroepactie-status",
-    description: "Recalls per vehicle: open, or reported repaired by the manufacturer.",
+    description: p(
+        "Recalls per vehicle: open, or reported repaired by the manufacturer.",
+        "Terugroepacties per voertuig: openstaand, of door de fabrikant hersteld gemeld.",
+    ),
     plate_keyed: true,
     order: "code_status, referentiecode_rdw",
 };
@@ -90,7 +121,10 @@ pub const RECALL_STATUS: Dataset = Dataset {
 pub const RECALL_DETAIL: Dataset = Dataset {
     id: "j9yg-7rg9",
     name: "terugroepactie",
-    description: "Recall detail: the defect, its consequences, the repair and who to contact.",
+    description: p(
+        "Recall detail: the defect, its consequences, the repair and who to contact.",
+        "Terugroepactie in detail: defect, gevolgen, herstel en waar u terecht kunt.",
+    ),
     plate_keyed: false,
     order: "referentiecode_rdw",
 };
@@ -99,7 +133,10 @@ pub const RECALL_DETAIL: Dataset = Dataset {
 pub const RECALL_RISK: Dataset = Dataset {
     id: "9ihi-jgpf",
     name: "terugroepactie-risico",
-    description: "The hazard a recall guards against, in RDW's own words.",
+    description: p(
+        "The hazard a recall guards against, in RDW's own words.",
+        "Het gevaar waartegen een terugroepactie beschermt, in de woorden van de RDW.",
+    ),
     plate_keyed: false,
     order: "referentiecode_rdw, code_mogelijk_gevaar",
 };
@@ -108,7 +145,10 @@ pub const RECALL_RISK: Dataset = Dataset {
 pub const INSPECTIONS: Dataset = Dataset {
     id: "sgfe-77wx",
     name: "meldingen",
-    description: "Notifications filed by inspection bodies, including tachograph tampering.",
+    description: p(
+        "Notifications filed by inspection bodies, including tachograph tampering.",
+        "Meldingen van keuringsinstanties, inclusief manipulatie van de tachograaf.",
+    ),
     plate_keyed: true,
     order: "meld_datum_door_keuringsinstantie DESC, meld_tijd_door_keuringsinstantie DESC, soort_melding_ki_omschrijving",
 };
@@ -117,7 +157,10 @@ pub const INSPECTIONS: Dataset = Dataset {
 pub const ODOMETER_REASONS: Dataset = Dataset {
     id: "jqs4-4kvw",
     name: "tellerstandtoelichting",
-    description: "Why RDW judged an odometer as it did. Embedded in this binary; no request needed.",
+    description: p(
+        "Why RDW judged an odometer as it did. Embedded in this binary; no request needed.",
+        "Waarom de RDW een tellerstand zo beoordeelde. Ingebouwd, dus geen verzoek nodig.",
+    ),
     plate_keyed: false,
     order: "code_toelichting_tellerstandoordeel",
 };
@@ -136,63 +179,84 @@ pub const KNOWN: &[Dataset] = &[
     Dataset {
         id: "3huj-srit",
         name: "assen",
-        description: "Axles: axle loads, track width, driven axles, spacing.",
+        description: p(
+            "Axles: axle loads, track width, driven axles, spacing.",
+            "Assen: aslasten, spoorbreedte, aangedreven assen, onderlinge afstand.",
+        ),
         plate_keyed: true,
         order: "as_nummer",
     },
     Dataset {
         id: "vezc-m2t6",
         name: "carrosserie",
-        description: "Body type of the vehicle.",
+        description: p(
+            "Body type of the vehicle.",
+            "Carrosserietype van het voertuig.",
+        ),
         plate_keyed: true,
         order: "carrosserie_volgnummer",
     },
     Dataset {
         id: "jhie-znh9",
         name: "carrosserie-specifiek",
-        description: "Body detail codes and their European descriptions.",
+        description: p(
+            "Body detail codes and their European descriptions.",
+            "Carrosseriecodes en hun Europese omschrijvingen.",
+        ),
         plate_keyed: true,
         order: "carrosserie_volgnummer, carrosserie_voertuig_nummer_code_volgnummer",
     },
     Dataset {
         id: "kmfi-hrps",
         name: "voertuigklasse",
-        description: "European vehicle class per body.",
+        description: p(
+            "European vehicle class per body.",
+            "Europese voertuigklasse per carrosserie.",
+        ),
         plate_keyed: true,
         order: "carrosserie_volgnummer, carrosserie_klasse_volgnummer",
     },
     Dataset {
         id: "7ug8-2dtt",
         name: "bijzonderheden",
-        description: "Special provisions and exemptions recorded against the vehicle.",
+        description: p(
+            "Special provisions and exemptions recorded against the vehicle.",
+            "Bijzonderheden en vrijstellingen die bij het voertuig zijn vastgelegd.",
+        ),
         plate_keyed: true,
         order: "bijzonderheid_volgnummer",
     },
     Dataset {
         id: "sghb-dzxx",
         name: "toegevoegde-objecten",
-        description: "Retrofitted objects, such as an LPG installation.",
+        description: p(
+            "Retrofitted objects, such as an LPG installation.",
+            "Achteraf toegevoegde objecten, zoals een LPG-installatie.",
+        ),
         plate_keyed: true,
         order: "montagedatum DESC, uitvoerings_volgnr_toegev_obj",
     },
     Dataset {
         id: "2ba7-embk",
         name: "subcategorie",
-        description: "Vehicle subcategory.",
+        description: p("Vehicle subcategory.", "Subcategorie van het voertuig."),
         plate_keyed: true,
         order: "subcategorie_voertuig_volgnummer",
     },
     Dataset {
         id: "3xwf-ince",
         name: "rupsbanden",
-        description: "Track (crawler) details for tracked vehicles.",
+        description: p(
+            "Track (crawler) details for tracked vehicles.",
+            "Rupsbandgegevens van rupsvoertuigen.",
+        ),
         plate_keyed: true,
         order: "rupsband_set_volgnr",
     },
     Dataset {
         id: "vkij-7mwc",
         name: "keuringen",
-        description: "Inspection expiry dates.",
+        description: p("Inspection expiry dates.", "Vervaldatums van keuringen."),
         plate_keyed: true,
         order: "vervaldatum_keuring DESC",
     },
@@ -210,9 +274,23 @@ pub fn resolve(needle: &str) -> Option<Dataset> {
         .copied()
 }
 
+/// Resolve a dataset by the English description a serialized row carries.
+///
+/// A row narrowed by `--fields description` has lost its `id` and its `name`, so
+/// the description is all that is left to recognize it by. It is the English side
+/// of a catalogue phrase and it is unique across the registry, which is what makes
+/// this an identification rather than a guess.
+pub fn resolve_description(description: &str) -> Option<Dataset> {
+    KNOWN
+        .iter()
+        .find(|d| Lang::En.say(&d.description) == description)
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn ids_and_names_are_unique() {
@@ -255,6 +333,66 @@ mod tests {
     fn does_not_resolve_unknown_names() {
         assert_eq!(resolve("nonsense"), None);
         assert_eq!(resolve(""), None);
+    }
+
+    #[test]
+    fn every_description_is_written_in_both_languages() {
+        // These phrases live outside `src/text.rs`, so the `ALL` sweep there
+        // does not reach them. A Dutch side left as a copy of the English one
+        // would print English under a Dutch header, which is the whole reason
+        // the field is a `Phrase`.
+        for d in KNOWN {
+            let en = Lang::En.say(&d.description);
+            let nl = Lang::Nl.say(&d.description);
+            assert!(
+                !en.trim().is_empty(),
+                "{} has no English description",
+                d.name
+            );
+            assert!(!nl.trim().is_empty(), "{} has no Dutch description", d.name);
+            assert_ne!(en, nl, "{} is not translated", d.name);
+            for (lang, text) in [("English", en), ("Dutch", nl)] {
+                assert!(
+                    !text.contains("{}"),
+                    "{} carries a placeholder in its {lang} description; \
+                     descriptions are rendered without values",
+                    d.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_english_description_names_exactly_one_dataset() {
+        // A row narrowed to its description is recognized by that description
+        // alone. Two datasets sharing one would make that lookup pick whichever
+        // came first and describe a row as the wrong dataset.
+        for d in KNOWN {
+            assert_eq!(
+                resolve_description(Lang::En.say(&d.description)).map(|found| found.name),
+                Some(d.name),
+                "{} does not have its description to itself",
+                d.name
+            );
+        }
+        assert_eq!(resolve_description("Something RDW never wrote."), None);
+        assert_eq!(resolve_description(""), None);
+    }
+
+    #[test]
+    fn the_machine_formats_keep_the_english_description() {
+        // The JSON, YAML and ndjson output of `datasets` is a contract that
+        // predates `--lang`, so `description` stays an English string there no
+        // matter which language the card is rendered in.
+        for d in KNOWN {
+            let serialized = serde_json::to_value(d).expect("a dataset serializes");
+            assert_eq!(
+                serialized.get("description").and_then(Value::as_str),
+                Some(Lang::En.say(&d.description)),
+                "{} does not serialize as its English description",
+                d.name
+            );
+        }
     }
 
     #[test]

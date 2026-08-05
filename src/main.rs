@@ -12,7 +12,7 @@ use std::time::Duration;
 use clap::error::ErrorKind as ClapErrorKind;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use kenteken::output::Style;
-use kenteken::text::Lang;
+use kenteken::text::{Lang, NOTE_NO_ROWS_IN_DATASET, NOTE_SHOWING_ROWS, WARNING_NOT_REGISTERED};
 use kenteken::{
     Command as Op, HttpSource, KentekenError, OutputFormat, Plate, Request, rdw, run, schema,
 };
@@ -46,7 +46,7 @@ struct Cli {
     #[arg(long, short = 'o', value_enum, default_value = "auto", global = true)]
     output: CliOutput,
 
-    /// Language for text output. JSON, YAML and ndjson are English in both.
+    /// Language for text and its stderr notes. JSON, YAML and ndjson are English in both.
     #[arg(long, value_enum, default_value = "nl", global = true)]
     lang: CliLang,
 
@@ -344,28 +344,45 @@ fn emit_metadata(request: &Request, outcome: &kenteken::Outcome) {
 /// Explain in words what stdout could not say, unless `--quiet`.
 ///
 /// Text renders only the rows, so a page cut short by `--limit` would read as
-/// the whole answer. JSON and YAML print the envelope and need no note.
+/// the whole answer. JSON and YAML print the envelope and need no note. These
+/// lines are prose for a reader, so they follow `--lang`; the machine surfaces
+/// that stay English are the error envelope and the ndjson metadata line.
 fn warn_about(request: &Request, outcome: &kenteken::Outcome) {
+    let lang = request.lang;
     if !outcome.not_found.is_empty() {
         eprintln!(
-            "warning: not registered with RDW: {}",
-            outcome.not_found.join(", ")
+            "{}",
+            lang.fill(&WARNING_NOT_REGISTERED, &outcome.not_found.join(", "))
         );
     }
     if !outcome.no_rows.is_empty() {
         eprintln!(
-            "note: registered, but no rows in this dataset: {}",
-            outcome.no_rows.join(", ")
+            "{}",
+            lang.fill(&NOTE_NO_ROWS_IN_DATASET, &outcome.no_rows.join(", "))
         );
     }
     if outcome.truncated && !request.format.states_counts() {
         eprintln!(
-            "note: showing rows {}-{} of {}; raise --limit or page with --offset",
-            request.offset + 1,
-            request.offset + outcome.shown,
-            outcome.total
+            "{}",
+            truncation_note(lang, request.offset, outcome.shown, outcome.total)
         );
     }
+}
+
+/// Which rows of how many the reader is looking at.
+///
+/// The counts are grouped the way the language groups them, like every other
+/// number this binary renders, so a listing of thousands of rows does not read
+/// as one long digit string.
+fn truncation_note(lang: Lang, offset: usize, shown: usize, total: usize) -> String {
+    lang.fill_all(
+        &NOTE_SHOWING_ROWS,
+        &[
+            &lang.thousands((offset + 1) as i64),
+            &lang.thousands((offset + shown) as i64),
+            &lang.thousands(total as i64),
+        ],
+    )
 }
 
 /// Normalize every plate argument, reporting the first that is not a plate.
@@ -531,6 +548,40 @@ mod tests {
                 "{sub} documents PLATE as {description:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_truncation_note_counts_the_page_the_reader_is_looking_at() {
+        // Off by one here misreports which rows someone just read: the first row
+        // of an unoffset page is row 1, and the last is the one after the offset.
+        assert_eq!(
+            truncation_note(Lang::En, 0, 3, 11),
+            "note: showing rows 1-3 of 11; raise --limit or page with --offset"
+        );
+        assert_eq!(
+            truncation_note(Lang::En, 10, 5, 20),
+            "note: showing rows 11-15 of 20; raise --limit or page with --offset"
+        );
+        assert_eq!(
+            truncation_note(Lang::Nl, 0, 3, 11),
+            "let op: toont rijen 1-3 van 11; verhoog --limit of blader met --offset"
+        );
+    }
+
+    #[test]
+    fn the_truncation_note_groups_its_thousands_the_way_the_language_does() {
+        // A five digit row count read as one string is the reason every other
+        // rendered number is grouped, and the two languages group it differently.
+        assert!(
+            truncation_note(Lang::En, 0, 10, 21_938).contains("of 21,938"),
+            "{}",
+            truncation_note(Lang::En, 0, 10, 21_938)
+        );
+        assert!(
+            truncation_note(Lang::Nl, 0, 10, 21_938).contains("van 21.938"),
+            "{}",
+            truncation_note(Lang::Nl, 0, 10, 21_938)
+        );
     }
 
     #[test]

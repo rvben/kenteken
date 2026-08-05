@@ -11,6 +11,7 @@
 //! cannot distinguish red from grey.
 
 use crate::facts;
+use crate::rdw::datasets;
 use crate::text::*;
 use crate::{Command, OutputFormat};
 use serde_json::Value;
@@ -998,9 +999,9 @@ fn notification_cell(item: &Value, voice: Voice) -> String {
 
 /// The datasets this build knows, as `kenteken datasets` prints them.
 ///
-/// The descriptions are English in both languages. They are the same strings the
-/// JSON contract and `schema` carry, describing what a caller gets back from each
-/// dataset rather than telling a reader about a vehicle.
+/// The descriptions say what a caller gets back from each dataset rather than
+/// telling a reader about a vehicle, and they follow `--lang` like every other
+/// rendered string. The JSON contract and `schema` keep the English wording.
 fn dataset_table(items: &[Value], voice: Voice) -> String {
     let cols = [
         Col::left(voice.say(&COL_NAME)),
@@ -1014,15 +1015,42 @@ fn dataset_table(items: &[Value], voice: Voice) -> String {
             vec![
                 cell(item, "name"),
                 cell(item, "id"),
+                // A row narrowed by `--fields` may not carry the flag at all,
+                // and "nee" would then claim that a dataset cannot be queried by
+                // plate when most of them can.
                 match item.get("plate_keyed") {
                     Some(Value::Bool(true)) => voice.say(&YES).to_string(),
-                    _ => voice.say(&NO).to_string(),
+                    Some(Value::Bool(false)) => voice.say(&NO).to_string(),
+                    _ => ABSENT.to_string(),
                 },
-                cell(item, "description"),
+                dataset_description(item, voice),
             ]
         })
         .collect();
     table(&cols, rows)
+}
+
+/// The description of a dataset row, in the reader's language.
+///
+/// The rows arrive as serialized `Dataset`s, whose `description` is the English
+/// side of the phrase, so the Dutch wording is read back out of the catalogue by
+/// the row's own id or name, or by that English description when `--fields` has
+/// left nothing else to recognize the row by. An item the catalogue does not know
+/// keeps whatever description it carries, and a projection that dropped the field
+/// keeps the column empty rather than inventing a description for it.
+fn dataset_description(item: &Value, voice: Voice) -> String {
+    let Some(english) = item.get("description").and_then(Value::as_str) else {
+        return cell(item, "description");
+    };
+    ["id", "name"]
+        .into_iter()
+        .filter_map(|key| item.get(key).and_then(Value::as_str))
+        .find_map(datasets::resolve)
+        .or_else(|| datasets::resolve_description(english))
+        .map_or_else(
+            || cell(item, "description"),
+            |d| voice.say(&d.description).to_string(),
+        )
 }
 
 /// Fallback table for `raw`, whose columns are whatever RDW returned.

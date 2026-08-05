@@ -53,7 +53,7 @@ fn global_args() -> Value {
             "type": "string",
             "enum": ["nl", "en"],
             "default": "nl",
-            "description": "Language of the rendered text. Text output only: json, yaml and ndjson carry the same English keys and values in either language."
+            "description": "Language of the rendered text, including the warnings and notes on stderr. json, yaml and ndjson carry the same English keys and values in either language, as do the error envelope and the ndjson metadata line."
         },
         {
             "name": "--quiet",

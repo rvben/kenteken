@@ -128,8 +128,9 @@ pub struct Request {
     pub format: OutputFormat,
     /// Whether the destination can render ANSI escapes.
     pub style: output::Style,
-    /// Which language the rendered text speaks. Text only: the JSON contract,
-    /// `schema` and error kinds are English in every language.
+    /// Which language the rendered text and the notes beside it speak. The JSON
+    /// contract, `schema`, the error envelope and the ndjson metadata line are
+    /// English in every language.
     pub lang: text::Lang,
     pub limit: usize,
     pub offset: usize,

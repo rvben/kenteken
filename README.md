@@ -95,7 +95,7 @@ DATUM       CODE  GEBREK
 2024-11-21  205   Band onvoldoende profiel
 2024-11-21  419   Blokkering gordel werkt niet (goed)
 2024-11-21  516   Dimlicht onjuist afgesteld
-note: showing rows 1-3 of 11; raise --limit or page with --offset
+let op: toont rijen 1-3 van 11; verhoog --limit of blader met --offset
 ```
 
 Rows arrive newest inspection first, so a page cut short by `--limit` shows the
@@ -230,7 +230,7 @@ error rather than a silently empty column.
 
 ### Language
 
-`--lang` takes `nl` (the default) or `en`, and moves the rendered text only:
+`--lang` takes `nl` (the default) or `en`, and moves the prose only:
 
 ```console
 $ kenteken lookup X-99-XXX --lang en -o text | head -4
@@ -256,8 +256,13 @@ Everything a program reads stays English and stays put:
   `derived` values and `derived.alarm` are the contract, so `--lang` cannot move
   them.
 - `schema`, `--help` and the completion scripts are English.
-- The notes on stderr and the error envelope are English, because they talk about
-  flags and exit codes and share their wording with the JSON they accompany.
+- The error envelope and the ndjson metadata line are English, because they are
+  parsed rather than read: an `error.kind` and a `total` are keys, and a script
+  that greps for one must not have to know which language produced it.
+
+The warnings and notes on stderr are prose for a reader, so they do follow
+`--lang`. So do the dataset descriptions `kenteken datasets` prints, while the
+`description` field in `json`, `yaml` and `ndjson` keeps its English wording.
 
 ## What RDW sent, and what it means
 

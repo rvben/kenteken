@@ -41,14 +41,21 @@ pub enum Lang {
 /// One phrase, in every language the tool renders.
 ///
 /// Both fields are required and neither has a default, which is the whole point:
-/// see the module documentation.
+/// see the module documentation. The fields stay private, so a phrase can only be
+/// read through [`Lang::say`] and the language is always chosen deliberately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Phrase {
     en: &'static str,
     nl: &'static str,
 }
 
 /// Write one phrase. Both languages are positional, so neither can be omitted.
-const fn p(en: &'static str, nl: &'static str) -> Phrase {
+///
+/// Visible crate-wide because a phrase belongs beside the thing it describes when
+/// that thing is a table of data: `rdw::datasets` writes its own descriptions, so
+/// adding a dataset stays one edit in one file. Nothing is lost by that, since the
+/// guarantee lives in the type rather than in this module.
+pub(crate) const fn p(en: &'static str, nl: &'static str) -> Phrase {
     Phrase { en, nl }
 }
 
@@ -94,7 +101,36 @@ impl Lang {
     /// they can be compared, and [`every_template_has_its_placeholder`] fails if
     /// one of them loses its slot.
     pub fn fill(self, phrase: &Phrase, value: &str) -> String {
-        self.say(phrase).replace("{}", value)
+        self.fill_all(phrase, &[value])
+    }
+
+    /// A phrase with its placeholders filled in, left to right.
+    ///
+    /// Positional rather than repeated: a note that names three numbers needs
+    /// three different values, and substituting one value into every slot would
+    /// print the first row count three times. A slot with no value left keeps its
+    /// literal `{}` rather than closing up, so a wrong count renders as visibly
+    /// broken instead of as a shorter sentence that reads complete.
+    pub fn fill_all(self, phrase: &Phrase, values: &[&str]) -> String {
+        let template = self.say(phrase);
+        debug_assert_eq!(
+            template.matches("{}").count(),
+            values.len(),
+            "{template:?} takes a different number of values than it was given"
+        );
+        let mut out = String::with_capacity(template.len());
+        let mut values = values.iter();
+        let mut rest = template;
+        while let Some((before, after)) = rest.split_once("{}") {
+            out.push_str(before);
+            match values.next() {
+                Some(value) => out.push_str(value),
+                None => out.push_str("{}"),
+            }
+            rest = after;
+        }
+        out.push_str(rest);
+        out
     }
 
     /// A counted noun: `1 day`, `30 days`, `13 jaar`, `5 zitplaatsen`.
@@ -332,6 +368,30 @@ pub const NO_DATASET_ROWS: Phrase = p(
     "{} is geregistreerd, zonder rijen in deze dataset",
 );
 
+// What stderr says beside the card.
+//
+// These are prose for whoever is reading the card, so they follow `--lang` like
+// the card does. The severity marker is part of the phrase rather than a literal
+// prefix: a Dutch line that opens with an English `warning:` is exactly the
+// half-translated output this module exists to prevent. The machine surfaces on
+// stderr are English in both languages and are not phrases at all: the error
+// envelope and the NDJSON metadata line are JSON a consumer parses.
+//
+// The flag names stay literal, because they are what the reader types back.
+
+pub const WARNING_NOT_REGISTERED: Phrase = p(
+    "warning: not registered with RDW: {}",
+    "waarschuwing: niet geregistreerd bij de RDW: {}",
+);
+pub const NOTE_NO_ROWS_IN_DATASET: Phrase = p(
+    "note: registered, but no rows in this dataset: {}",
+    "let op: geregistreerd, maar geen rijen in deze dataset: {}",
+);
+pub const NOTE_SHOWING_ROWS: Phrase = p(
+    "note: showing rows {}-{} of {}; raise --limit or page with --offset",
+    "let op: toont rijen {}-{} van {}; verhoog --limit of blader met --offset",
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +402,10 @@ mod tests {
     /// missing from here is still complete in both languages, it is merely
     /// unswept. The guarantee that matters, that neither language can be
     /// omitted, is enforced by the type and not by this list.
+    ///
+    /// This is the catalogue in this module. The phrases written beside their own
+    /// data, the dataset descriptions in [`crate::rdw::datasets`], are swept by a
+    /// test there over the registry itself.
     const ALL: &[&Phrase] = &[
         &TODAY,
         &FUTURE,
@@ -428,6 +492,9 @@ mod tests {
         &NO_RECALLS,
         &NO_INSPECTIONS,
         &NO_DATASET_ROWS,
+        &WARNING_NOT_REGISTERED,
+        &NOTE_NO_ROWS_IN_DATASET,
+        &NOTE_SHOWING_ROWS,
     ];
 
     #[test]
@@ -454,15 +521,41 @@ mod tests {
         // A template that loses its slot in one language silently drops the
         // value it was carrying: `VERLOPEN 8 maanden geleden` becomes a bare
         // `VERLOPEN`, which reads as a complete answer and is not one.
+        //
+        // Counted rather than merely present, because a phrase carrying three
+        // values has three ways to lose one, and every one of them satisfies
+        // "both languages contain a slot".
         for phrase in ALL {
             assert_eq!(
-                phrase.en.contains("{}"),
-                phrase.nl.contains("{}"),
-                "one language takes a value and the other does not: {:?} / {:?}",
+                phrase.en.matches("{}").count(),
+                phrase.nl.matches("{}").count(),
+                "the two languages take different numbers of values: {:?} / {:?}",
                 phrase.en,
                 phrase.nl
             );
         }
+    }
+
+    #[test]
+    fn placeholders_are_filled_in_order_and_not_repeated() {
+        // The page note names three different numbers. `replace` would print the
+        // first of them three times, which is a wrong answer that reads like a
+        // right one.
+        assert_eq!(
+            Lang::Nl.fill_all(&NOTE_SHOWING_ROWS, &["1", "3", "11"]),
+            "let op: toont rijen 1-3 van 11; verhoog --limit of blader met --offset"
+        );
+        assert_eq!(
+            Lang::En.fill_all(&NOTE_SHOWING_ROWS, &["1", "3", "11"]),
+            "note: showing rows 1-3 of 11; raise --limit or page with --offset"
+        );
+
+        // One value through the one-value door is the same string either way.
+        assert_eq!(Lang::Nl.fill(&PAST, "3 dagen"), "3 dagen geleden");
+        assert_eq!(
+            Lang::Nl.fill_all(&PAST, &["3 dagen"]),
+            Lang::Nl.fill(&PAST, "3 dagen")
+        );
     }
 
     #[test]

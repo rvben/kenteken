@@ -368,18 +368,30 @@ fn limit_and_offset_page_without_lying_about_the_total() {
 }
 
 #[test]
-fn a_text_page_cut_short_by_limit_says_so_on_stderr() {
+fn a_text_page_cut_short_by_limit_says_so_on_stderr_in_the_readers_language() {
     // Text output is just the rows. A human given two of eighteen datasets with
-    // nothing said would take those two for the whole list.
+    // nothing said would take those two for the whole list. The note is prose
+    // for that human, so the Dutch default says it in Dutch.
     let total = serde_json::from_str::<Value>(&run(&["datasets"]).stdout).unwrap()["total"]
         .as_u64()
         .unwrap();
-    let out = run(&["-o", "text", "--limit", "2", "datasets"]);
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let dutch = run(&["-o", "text", "--limit", "2", "datasets"]);
+    assert_eq!(dutch.code, 0, "stderr: {}", dutch.stderr);
     assert!(
-        out.stderr.contains(&format!("showing rows 1-2 of {total}")),
+        dutch
+            .stderr
+            .contains(&format!("let op: toont rijen 1-2 van {total}")),
         "stderr was: {}",
-        out.stderr
+        dutch.stderr
+    );
+    let english = run(&["-o", "text", "--lang", "en", "--limit", "2", "datasets"]);
+    assert_eq!(english.code, 0, "stderr: {}", english.stderr);
+    assert!(
+        english
+            .stderr
+            .contains(&format!("note: showing rows 1-2 of {total}")),
+        "stderr was: {}",
+        english.stderr
     );
 }
 
@@ -388,18 +400,86 @@ fn the_final_page_of_a_text_listing_is_not_announced_as_cut_short() {
     let total = serde_json::from_str::<Value>(&run(&["datasets"]).stdout).unwrap()["total"]
         .as_u64()
         .unwrap();
-    let out = run(&[
-        "-o",
-        "text",
-        "--offset",
-        &(total - 1).to_string(),
-        "datasets",
-    ]);
-    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    for lang in ["nl", "en"] {
+        let out = run(&[
+            "-o",
+            "text",
+            "--lang",
+            lang,
+            "--offset",
+            &(total - 1).to_string(),
+            "datasets",
+        ]);
+        assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+        // Naming the wording in one language only would pass on a note printed
+        // in the other, so the last page has to carry no note at all.
+        assert!(
+            out.stderr.trim().is_empty(),
+            "the last page carries every remaining row, {lang} stderr was: {}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
+fn a_dataset_listing_describes_its_datasets_in_the_readers_language() {
+    // The rows reach the renderer as serialized datasets, whose `description` is
+    // the English side of the phrase. Rendering that string straight through is
+    // how English sentences ended up under Dutch headers.
+    let dutch = run(&["-o", "text", "datasets"]);
+    assert_eq!(dutch.code, 0, "stderr: {}", dutch.stderr);
     assert!(
-        !out.stderr.contains("showing rows"),
-        "the last page carries every remaining row, stderr was: {}",
-        out.stderr
+        dutch.stdout.contains("Geregistreerde voertuigen:"),
+        "stdout was:\n{}",
+        dutch.stdout
+    );
+    assert!(
+        !dutch.stdout.contains("Registered vehicles:"),
+        "an English description under a Dutch header, stdout was:\n{}",
+        dutch.stdout
+    );
+    let english = run(&["-o", "text", "--lang", "en", "datasets"]);
+    assert_eq!(english.code, 0, "stderr: {}", english.stderr);
+    assert!(
+        english.stdout.contains("Registered vehicles:"),
+        "stdout was:\n{}",
+        english.stdout
+    );
+    assert!(
+        !english.stdout.contains("Geregistreerde voertuigen:"),
+        "a Dutch description under an English header, stdout was:\n{}",
+        english.stdout
+    );
+}
+
+#[test]
+fn a_narrowed_dataset_listing_describes_and_qualifies_its_rows_honestly() {
+    // `--fields description` takes away the id and the name the description was
+    // looked up by, and `--fields name,id` takes away the flag the third column
+    // reports. Neither may turn into English prose or into a false "nee".
+    let described = run(&["-o", "text", "--fields", "description", "datasets"]);
+    assert_eq!(described.code, 0, "stderr: {}", described.stderr);
+    assert!(
+        described.stdout.contains("Geregistreerde voertuigen:"),
+        "stdout was:\n{}",
+        described.stdout
+    );
+    assert!(
+        !described.stdout.contains("Registered vehicles:"),
+        "an English description under a Dutch header, stdout was:\n{}",
+        described.stdout
+    );
+
+    let named = run(&["-o", "text", "--fields", "name,id", "datasets"]);
+    assert_eq!(named.code, 0, "stderr: {}", named.stderr);
+    let row = named
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("voertuigen"))
+        .unwrap_or_else(|| panic!("no vehicle row, stdout was:\n{}", named.stdout));
+    assert!(
+        !row.contains("nee") && !row.contains(" ja"),
+        "a projected row must not answer for a flag it does not carry: {row}"
     );
 }
 
