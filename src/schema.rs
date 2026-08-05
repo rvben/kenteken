@@ -292,7 +292,7 @@ fn vehicle_derived() -> Value {
         {"name": "derived.power_kw", "type": "number | null", "description": "Net maximum power of the primary fuel, in kW. Read from the electric power column when that is the one RDW filled in."},
         {"name": "derived.co2_g_per_km", "type": "number | null", "description": "Combined CO2 in g/km."},
         {"name": "derived.co2_basis", "type": "string | null", "enum_note": "wltp | nedc", "description": "Which test cycle produced co2_g_per_km. The two are not comparable, so the figure is never reported without it."},
-        {"name": "derived.electric_range_km", "type": "number | null"},
+        {"name": "derived.electric_range_km", "type": "number | null", "description": "Electric range in km. Null, never 0, for a vehicle with no electric drive: RDW writes 0 into actieradius where the column does not apply, and 315,417 of those zeroes sit on diesel rows."},
         {"name": "derived.engine_cc", "type": "integer | null", "description": "Engine displacement in cm3. Null, never 0, for a vehicle with no combustion engine."},
         {"name": "derived.energy_label", "type": "string | null", "enum_note": "A | B | C | D | E | F | G", "description": "RDW's fuel economy grade. Null for most of the register: 7.128M of the 7.130M vehicles that have one are passenger cars."},
         {"name": "derived.mass_empty_kg", "type": "integer | null"},
@@ -348,7 +348,7 @@ fn fuel_fields() -> Value {
         {"name": "derived.power_kw", "type": "number | null", "description": "Net maximum power in kW, from whichever column RDW filled in."},
         {"name": "derived.co2_g_per_km", "type": "number | null"},
         {"name": "derived.co2_basis", "type": "string | null", "description": "wltp or nedc: which test cycle produced co2_g_per_km."},
-        {"name": "derived.electric_range_km", "type": "number | null"},
+        {"name": "derived.electric_range_km", "type": "number | null", "description": "Electric range in km. Null, never 0, for a vehicle with no electric drive: RDW writes 0 into actieradius where the column does not apply, and 315,417 of those zeroes sit on diesel rows."},
         {"name": "derived.euro_class", "type": "string | null"},
         {"name": "derived.consumption_l_per_100km", "type": "number | null"}
     ])

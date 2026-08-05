@@ -503,10 +503,25 @@ pub fn co2(row: &Value) -> Option<(f64, &'static str)> {
 }
 
 /// Electric range in km, for a battery or plug-in hybrid vehicle.
+///
+/// A zero is a sentinel here, so it is dropped rather than reported. Counted
+/// against the live register, `actieradius` holds 1,311,897 zeroes against
+/// 235,595 real figures, and 315,417 of those zeroes sit on diesel rows: a
+/// diesel does not have a range of zero kilometres, it has no electric range
+/// for the column to describe. The two WLTP columns are the counter-example
+/// that makes this RDW's convention rather than our guess, holding 5 zeroes
+/// between them across 1.17M rows because RDW leaves them empty instead.
+///
+/// Filtered per column rather than once at the end, so a column that does not
+/// apply cannot mask a later one that does.
 pub fn electric_range_km(row: &Value) -> Option<f64> {
-    number(row, "actie_radius_enkel_elektrisch_wltp")
-        .or_else(|| number(row, "actieradius"))
-        .or_else(|| number(row, "actie_radius_extern_opladen_wltp"))
+    [
+        "actie_radius_enkel_elektrisch_wltp",
+        "actieradius",
+        "actie_radius_extern_opladen_wltp",
+    ]
+    .into_iter()
+    .find_map(|key| number(row, key).filter(|km| *km > 0.0))
 }
 
 /// A date with the relative phrase a reader actually wants next to it.
@@ -808,6 +823,41 @@ mod tests {
         assert_eq!(v["power_kw"], 220.0);
         assert_eq!(v["electric_range_km"], 533.0);
         assert_eq!(v["fuels"], json!(["Elektriciteit"]));
+    }
+
+    #[test]
+    fn a_zero_electric_range_is_a_column_that_does_not_apply() {
+        // 315,417 diesel rows carry `actieradius` 0, and not one of them can
+        // drive zero kilometres. Reporting it puts `0 km range` on a diesel.
+        let diesel = json!({"brandstof_omschrijving": "Diesel", "actieradius": "0"});
+        assert_eq!(electric_range_km(&diesel), None);
+
+        // The negative control: a rule that dropped every range would satisfy
+        // the assertion above and report nothing for any electric vehicle.
+        let ev = json!({"actie_radius_enkel_elektrisch_wltp": 533});
+        assert_eq!(electric_range_km(&ev), Some(533.0));
+
+        // A column that does not apply must not mask a later one that does,
+        // which is what reading the fallback chain as "first value present"
+        // would do.
+        let plug_in = json!({"actieradius": "0", "actie_radius_extern_opladen_wltp": 62});
+        assert_eq!(electric_range_km(&plug_in), Some(62.0));
+
+        // Across a hybrid's fuel rows the same holds: the combustion row is
+        // silent about range rather than claiming zero, so the vehicle takes
+        // the figure from the row that has one.
+        let v = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "fuel": [
+                    {"brandstof_omschrijving": "Benzine", "actieradius": "0"},
+                    {"brandstof_omschrijving": "Elektriciteit",
+                     "actie_radius_enkel_elektrisch_wltp": 58},
+                ],
+            })),
+            None,
+        );
+        assert_eq!(v["electric_range_km"], 58.0);
     }
 
     #[test]
