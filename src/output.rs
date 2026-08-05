@@ -257,7 +257,12 @@ fn vehicle_card(item: &Value, style: Style) -> String {
 
     let mut lines: Vec<(&str, String)> = Vec::new();
     push(&mut lines, "Type", kind_line(d));
-    push(&mut lines, "APK expires", apk_line(d, style));
+    push(&mut lines, "APK expires", expiry_line(d, "apk", style));
+    push(
+        &mut lines,
+        "Tachograph expires",
+        expiry_line(d, "tachograph", style),
+    );
     push(
         &mut lines,
         "First admitted",
@@ -271,13 +276,31 @@ fn vehicle_card(item: &Value, style: Style) -> String {
     push(&mut lines, "On the Dutch register", dutch_line(d));
     push(&mut lines, "Colour", colour_line(d));
     push(&mut lines, "Fuel", fuel_line(item));
+    push(
+        &mut lines,
+        "Engine",
+        n(d, "engine_cc").map(|cc| format!("{} cm3", facts::thousands(cc as i64))),
+    );
+    push(
+        &mut lines,
+        "Energy label",
+        s(d, "energy_label").map(str::to_string),
+    );
     push(&mut lines, "Mass", mass_line(d));
+    push(&mut lines, "Towing", towing_line(d));
+    push(&mut lines, "Dimensions", dimensions_line(d));
+    push(
+        &mut lines,
+        "VIN location",
+        s(d, "vin_location").map(str::to_string),
+    );
     push(
         &mut lines,
         "Catalogue price",
         n(d, "catalogue_price_eur").map(|p| format!("EUR {}", facts::thousands(p as i64))),
     );
     push(&mut lines, "Odometer", odometer_line(d, style));
+    push(&mut lines, "Odometer note", odometer_reason_line(d));
     push(&mut lines, "Insured (WAM)", insured_line(d, style));
     push(&mut lines, "Recall", recall_line(d, style));
     push(&mut lines, "Recall hazard", recall_hazard_line(d));
@@ -381,7 +404,7 @@ fn when(flag: Option<bool>, text: &str) -> Option<String> {
     flag.unwrap_or(false).then(|| text.to_string())
 }
 
-/// `Personenauto (M1), MPV`: what kind of vehicle this is.
+/// `Personenauto (M1), MPV, 5 seats, 4 doors`: what kind of vehicle this is.
 fn kind_line(d: &Value) -> Option<String> {
     let head = match (s(d, "kind"), s(d, "eu_category")) {
         (Some(kind), Some(cat)) => format!("{kind} ({cat})"),
@@ -392,6 +415,10 @@ fn kind_line(d: &Value) -> Option<String> {
     let parts: Vec<String> = [
         Some(head).filter(|h| !h.is_empty()),
         s(d, "body").map(facts::title_case),
+        // `0 doors` is printed rather than hidden. It is what RDW recorded, and
+        // on the trailer or motorcycle that carries it, it is true.
+        n(d, "seats").map(|c| quantity(c as i64, "seat")),
+        n(d, "doors").map(|c| quantity(c as i64, "door")),
     ]
     .into_iter()
     .flatten()
@@ -399,18 +426,62 @@ fn kind_line(d: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// The APK line, which is the reason most people run this tool.
-fn apk_line(d: &Value, style: Style) -> Option<String> {
-    let expiry = s(d, "apk_expiry")?;
-    let Some(days) = n(d, "apk_days_remaining") else {
+/// `1 seat`, `5 seats`.
+fn quantity(count: i64, unit: &str) -> String {
+    match count {
+        1 => format!("1 {unit}"),
+        n => format!("{} {unit}s", facts::thousands(n)),
+    }
+}
+
+/// A dated deadline: how long is left, and a shout once it has passed.
+///
+/// Shared by the two inspections the register dates itself. The APK is the
+/// reason most people run this tool; the tachograph is the reason a haulier
+/// does, and it runs on a cycle of its own.
+fn expiry_line(d: &Value, prefix: &str, style: Style) -> Option<String> {
+    let expiry = s(d, &format!("{prefix}_expiry"))?;
+    let Some(days) = n(d, &format!("{prefix}_days_remaining")) else {
         // No clock, so no verdict. The date alone is still the honest answer.
         return Some(expiry.to_string());
     };
     let phrase = date::humanize_offset(days as i64);
-    Some(match b(d, "apk_expired") {
+    Some(match b(d, &format!("{prefix}_expired")) {
         Some(true) => format!("{expiry}   {}", style.alarm(&format!("EXPIRED {phrase}"))),
         _ => format!("{expiry}   {phrase}"),
     })
+}
+
+/// What the vehicle may pull, braked and unbraked.
+///
+/// A vehicle that may not tow has neither figure rather than a zero, so nothing
+/// here has to stand for "not permitted".
+fn towing_line(d: &Value) -> Option<String> {
+    let parts: Vec<String> = [("tow_braked_kg", "braked"), ("tow_unbraked_kg", "unbraked")]
+        .into_iter()
+        .filter_map(|(key, word)| {
+            n(d, key).map(|kg| format!("{} kg {word}", facts::thousands(kg as i64)))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// Whichever of the three dimensions RDW measured, each said in full.
+///
+/// Named rather than laid out as `l x w x h`, because RDW routinely has one or
+/// two of the three and a positional form would need a placeholder for the rest.
+fn dimensions_line(d: &Value) -> Option<String> {
+    let parts: Vec<String> = [
+        ("length_cm", "long"),
+        ("width_cm", "wide"),
+        ("height_cm", "high"),
+    ]
+    .into_iter()
+    .filter_map(|(key, word)| {
+        n(d, key).map(|cm| format!("{} cm {word}", facts::thousands(cm as i64)))
+    })
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// A date with how long ago it was, when the tool knows today's date.
@@ -489,21 +560,40 @@ fn mass_line(d: &Value) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
+/// RDW's verdict on the odometer, and the year the readings behind it stop.
+///
+/// The verdict alone reads as current whatever its age, so a history last
+/// touched in 2016 and one read last month say the same word. The year is what
+/// separates them, and it stays on this line with the verdict: RDW's own
+/// explanation is a full Dutch sentence, and joining it here would wrap the
+/// pair onto three lines and bury the date.
+///
+/// Either half stands on its own, because the register routinely has one
+/// without the other: 730,494 vehicles carry a reading year with no verdict
+/// against it, and dropping the line for want of a verdict would throw away the
+/// only odometer fact RDW has for them.
 fn odometer_line(d: &Value, style: Style) -> Option<String> {
-    let verdict = s(d, "odometer")?;
-    let rendered = match verdict {
+    let verdict = s(d, "odometer").map(|verdict| match verdict {
         "consistent" => "consistent".to_string(),
         "inconsistent" => style.alarm("INCONSISTENT"),
         other => other.replace('_', " "),
-    };
-    // RDW's own reason for the verdict, which is the interesting part when it
-    // declined to judge or found a jump. Left off a consistent history, where it
-    // only repeats that nothing is wrong.
-    let reason = s(d, "odometer_reason").filter(|_| verdict != "consistent");
-    Some(match reason {
-        Some(reason) => format!("{rendered}   {reason}"),
-        None => rendered,
-    })
+    });
+    // Said as a year, not grouped as a quantity: RDW records 1961 through 2026,
+    // and `2,016` would read as a distance rather than a date.
+    let year = n(d, "odometer_year").map(|year| format!("last reading {}", year as i64));
+    match (verdict, year) {
+        (Some(verdict), Some(year)) => Some(format!("{verdict}   {year}")),
+        (verdict, year) => verdict.or(year),
+    }
+}
+
+/// RDW's own reason for that verdict, which is the interesting part when it
+/// declined to judge or found a jump.
+///
+/// Left off a consistent history, where it only repeats that nothing is wrong.
+fn odometer_reason_line(d: &Value) -> Option<String> {
+    s(d, "odometer").filter(|verdict| *verdict != "consistent")?;
+    s(d, "odometer_reason").map(str::to_string)
 }
 
 fn insured_line(d: &Value, style: Style) -> Option<String> {
@@ -1825,6 +1915,198 @@ mod tests {
         let rendered = plain(&clean, &lookup());
         assert!(rendered.contains("consistent"), "rendered:\n{rendered}");
         assert!(!rendered.contains("verklaarbaar"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn a_dimension_rdw_did_not_measure_is_not_printed_as_zero_centimetres() {
+        let unmeasured = envelope(json!([{
+            "kenteken": "X99XXX",
+            "lengte": "0",
+            "breedte": "0",
+            "hoogte_voertuig": "0",
+        }]));
+        let rendered = plain(&unmeasured, &lookup());
+        assert!(!rendered.contains("Dimensions"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("0 cm"), "rendered:\n{rendered}");
+
+        // The negative control: a card that never printed dimensions at all
+        // would pass both assertions above.
+        let measured = envelope(json!([{
+            "kenteken": "X99XXX",
+            "lengte": "645",
+            "breedte": "255",
+            "hoogte_voertuig": "400",
+        }]));
+        let rendered = plain(&measured, &lookup());
+        assert!(
+            rendered.contains("645 cm long, 255 cm wide, 400 cm high"),
+            "rendered:\n{rendered}"
+        );
+
+        // A vehicle measured in one direction only says which one, rather than
+        // padding the other two out to keep a positional `l x w x h` shape.
+        let partial = envelope(json!([{"kenteken": "X99XXX", "hoogte_voertuig": "400"}]));
+        let rendered = plain(&partial, &lookup());
+        assert!(rendered.contains("400 cm high"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("long"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("wide"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn an_odometer_verdict_carries_the_year_its_readings_stop() {
+        // Without the year the verdict reads as current whatever its age: a
+        // history last touched in 2016 and one read last month say one word.
+        let env = envelope(json!([{
+            "kenteken": "X99XXX",
+            "tellerstandoordeel": "Logisch",
+            "jaar_laatste_registratie_tellerstand": "2016",
+        }]));
+        let rendered = plain(&env, &lookup());
+        assert!(
+            rendered.contains("consistent   last reading 2016"),
+            "rendered:\n{rendered}"
+        );
+        // A year is a date, not a quantity. Grouped as `2,016` it reads as a
+        // distance, and every other number on this card is one.
+        assert!(!rendered.contains("2,016"), "rendered:\n{rendered}");
+
+        // RDW records each half without the other, and either alone is worth
+        // saying: 730,494 vehicles have a reading year and no verdict.
+        let verdict_only =
+            envelope(json!([{"kenteken": "X99XXX", "tellerstandoordeel": "Logisch"}]));
+        let rendered = plain(&verdict_only, &lookup());
+        assert!(rendered.contains("consistent"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("last reading"), "rendered:\n{rendered}");
+
+        let year_only = envelope(json!([{
+            "kenteken": "X99XXX",
+            "jaar_laatste_registratie_tellerstand": "2016",
+        }]));
+        let rendered = plain(&year_only, &lookup());
+        assert!(
+            rendered.contains("Odometer") && rendered.contains("last reading 2016"),
+            "rendered:\n{rendered}"
+        );
+        assert!(!rendered.contains("consistent"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn the_tachograph_deadline_is_shown_beside_the_apk_and_never_as_it() {
+        // A lorry can hold a current APK and an expired tachograph. Both lines
+        // are asserted, so rendering one deadline against the other's label
+        // fails rather than passing on half the card.
+        let env = envelope(json!([{
+            "kenteken": "X99XXX",
+            "vervaldatum_apk": "20261109",
+            "vervaldatum_tachograaf": "20260301",
+        }]));
+        let rendered = plain(&env, &lookup());
+        let apk = rendered
+            .lines()
+            .find(|l| l.contains("APK expires"))
+            .expect("the APK line is rendered");
+        assert!(apk.contains("2026-11-09"), "APK line: {apk:?}");
+        assert!(!apk.contains("EXPIRED"), "APK line: {apk:?}");
+
+        let tacho = rendered
+            .lines()
+            .find(|l| l.contains("Tachograph expires"))
+            .expect("the tachograph line is rendered");
+        assert!(tacho.contains("2026-03-01"), "tachograph line: {tacho:?}");
+        assert!(tacho.contains("EXPIRED"), "tachograph line: {tacho:?}");
+    }
+
+    #[test]
+    fn a_vehicle_with_no_tachograph_gets_no_tachograph_line() {
+        // 98.8% of the register. A line reading "not applicable" against every
+        // one of them is noise, and one reading a date would be a lie.
+        let env = envelope(json!([{"kenteken": "X99XXX", "vervaldatum_apk": "20261109"}]));
+        let rendered = plain(&env, &lookup());
+        assert!(rendered.contains("APK expires"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("Tachograph"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn the_type_line_counts_seats_and_doors_and_none_is_still_a_count() {
+        let car = envelope(json!([{
+            "kenteken": "X99XXX",
+            "voertuigsoort": "Personenauto",
+            "europese_voertuigcategorie": "M1",
+            "inrichting": "stationwagen",
+            "aantal_zitplaatsen": "5",
+            "aantal_deuren": "4",
+        }]));
+        let rendered = plain(&car, &lookup());
+        assert!(
+            rendered.contains("Personenauto (M1), stationwagen, 5 seats, 4 doors"),
+            "rendered:\n{rendered}"
+        );
+
+        // A trailer has no doors, and RDW says so with a zero rather than by
+        // leaving the column out. Hiding it would lose a fact.
+        let trailer = envelope(json!([{
+            "kenteken": "X99XXX",
+            "voertuigsoort": "Aanhangwagen",
+            "aantal_deuren": "0",
+        }]));
+        let rendered = plain(&trailer, &lookup());
+        assert!(
+            rendered.contains("Aanhangwagen, 0 doors"),
+            "rendered:\n{rendered}"
+        );
+
+        // One of a thing is one, not "1 seats".
+        let single = envelope(json!([{"kenteken": "X99XXX", "aantal_zitplaatsen": "1"}]));
+        let rendered = plain(&single, &lookup());
+        assert!(rendered.contains("1 seat"), "rendered:\n{rendered}");
+        assert!(!rendered.contains("1 seats"), "rendered:\n{rendered}");
+    }
+
+    #[test]
+    fn towing_capacity_is_reported_braked_and_unbraked() {
+        let env = envelope(json!([{
+            "kenteken": "X99XXX",
+            "maximum_trekken_massa_geremd": "3500",
+            "maximum_massa_trekken_ongeremd": "750",
+        }]));
+        let rendered = plain(&env, &lookup());
+        assert!(
+            rendered.contains("3,500 kg braked, 750 kg unbraked"),
+            "rendered:\n{rendered}"
+        );
+
+        // A vehicle that may not tow has neither figure, so no line here has to
+        // stand for "not permitted".
+        let none = envelope(json!([{"kenteken": "X99XXX"}]));
+        assert!(!plain(&none, &lookup()).contains("Towing"));
+    }
+
+    #[test]
+    fn the_card_reports_the_engine_the_energy_label_and_where_the_vin_is_stamped() {
+        let env = envelope(json!([{
+            "kenteken": "X99XXX",
+            "cilinderinhoud": "2998",
+            "zuinigheidsclassificatie": "C",
+            "plaats_chassisnummer": "r. tegen schutbord onder motorkap",
+        }]));
+        let rendered = plain(&env, &lookup());
+        assert!(rendered.contains("2,998 cm3"), "rendered:\n{rendered}");
+        assert!(rendered.contains("Energy label"), "rendered:\n{rendered}");
+        // RDW's own abbreviated Dutch. Someone is standing at the vehicle with
+        // this on screen, and expanding it would be the tool guessing where a
+        // stamped number is.
+        assert!(
+            rendered.contains("r. tegen schutbord onder motorkap"),
+            "rendered:\n{rendered}"
+        );
+
+        // The negative control: none of these three labels appears on a card
+        // RDW gave nothing for.
+        let bare = envelope(json!([{"kenteken": "X99XXX"}]));
+        let rendered = plain(&bare, &lookup());
+        for label in ["Engine", "Energy label", "VIN location"] {
+            assert!(!rendered.contains(label), "{label} on an empty card");
+        }
     }
 
     #[test]

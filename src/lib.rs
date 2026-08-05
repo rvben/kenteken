@@ -21,6 +21,10 @@
 //! to `null`. The text output is a rendering of that same block, so an agent and
 //! a human are answered from one computation rather than two.
 
+// The vehicle's derived block is one `json!` literal of forty-odd keys, and the
+// macro expands one level deeper per key.
+#![recursion_limit = "256"]
+
 pub mod date;
 pub mod error;
 pub mod facts;

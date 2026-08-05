@@ -221,8 +221,9 @@ fn vehicle_fields() -> Value {
 
 /// The columns of the vehicle register worth declaring.
 ///
-/// RDW serves 62 columns and adds to them; rows are passed through untouched, so
-/// this lists the fields a consumer can rely on rather than everything present.
+/// RDW serves ninety-eight columns today and adds to them; rows are passed
+/// through untouched, so this lists the fields a consumer can rely on rather
+/// than everything present.
 fn vehicle_columns() -> Value {
     json!([
         {"name": "kenteken", "type": "string", "description": "Plate, uppercase and without separators."},
@@ -231,6 +232,18 @@ fn vehicle_columns() -> Value {
         {"name": "voertuigsoort", "type": "string", "description": "Vehicle kind, e.g. Personenauto."},
         {"name": "europese_voertuigcategorie", "type": "string", "description": "EU category, e.g. M1."},
         {"name": "vervaldatum_apk", "type": "string", "description": "APK expiry as YYYYMMDD. Absent when the vehicle needs no inspection."},
+        {"name": "vervaldatum_tachograaf", "type": "string", "description": "Tachograph inspection expiry as YYYYMMDD. Absent for the 98.8% of vehicles that have no tachograph."},
+        {"name": "aantal_zitplaatsen", "type": "string", "description": "Number of seats. Absent rather than zero when RDW has no count."},
+        {"name": "aantal_deuren", "type": "string", "description": "Number of doors. Zero is a real count, not an absence: 1.95M trailers and motorcycles have none."},
+        {"name": "cilinderinhoud", "type": "string", "description": "Engine displacement in cm3. Absent, never zero, for a vehicle with no combustion engine."},
+        {"name": "zuinigheidsclassificatie", "type": "string", "description": "Fuel economy grade, A to G. In practice only passenger cars carry one."},
+        {"name": "maximum_trekken_massa_geremd", "type": "string", "description": "Maximum braked towing mass in kg. Absent, never zero, when the vehicle may not tow."},
+        {"name": "maximum_massa_trekken_ongeremd", "type": "string", "description": "Maximum unbraked towing mass in kg."},
+        {"name": "lengte", "type": "string", "description": "Length in cm. RDW writes 0 where it has no measurement; see derived.length_cm."},
+        {"name": "breedte", "type": "string", "description": "Width in cm, with the same 0 for unmeasured; see derived.width_cm."},
+        {"name": "hoogte_voertuig", "type": "string", "description": "Height in cm, with the same 0 for unmeasured; see derived.height_cm."},
+        {"name": "plaats_chassisnummer", "type": "string", "description": "Where the VIN is stamped on the vehicle, in RDW's abbreviated Dutch."},
+        {"name": "jaar_laatste_registratie_tellerstand", "type": "string", "description": "Year of the most recent odometer reading RDW registered."},
         {"name": "datum_eerste_toelating", "type": "string", "description": "First admission to the road, YYYYMMDD."},
         {"name": "datum_tenaamstelling", "type": "string", "description": "Date of the current registration, YYYYMMDD."},
         {"name": "eerste_kleur", "type": "string", "description": "Primary colour. May be a placeholder; see derived.colour."},
@@ -260,11 +273,16 @@ fn vehicle_derived() -> Value {
         {"name": "derived.kind", "type": "string | null", "description": "Vehicle kind, e.g. Personenauto."},
         {"name": "derived.eu_category", "type": "string | null", "description": "EU category, e.g. M1."},
         {"name": "derived.body", "type": "string | null", "description": "Body style, e.g. hatchback."},
+        {"name": "derived.seats", "type": "integer | null", "description": "Number of seats. RDW omits the column rather than writing a zero here: not one row in 16.8M carries a 0, against 3.35M that leave it out."},
+        {"name": "derived.doors", "type": "integer | null", "description": "Zero is a true count and not an absence: 1.95M vehicles on the register have no doors, being trailers and motorcycles."},
         {"name": "derived.colour", "type": "string | null"},
         {"name": "derived.second_colour", "type": "string | null", "description": "Null for a single-tone vehicle, which is most of them."},
         {"name": "derived.apk_expiry", "type": "string | null", "description": "APK expiry as ISO 8601. Null when the vehicle needs no inspection."},
         {"name": "derived.apk_expired", "type": "boolean | null", "description": "Null, never false, when there is no expiry date or no usable clock: a vehicle that needs no inspection has not passed one. Measured against the Dutch calendar day."},
         {"name": "derived.apk_days_remaining", "type": "integer | null", "description": "Days until expiry, negative once past. Null when apk_expired is null."},
+        {"name": "derived.tachograph_expiry", "type": "string | null", "description": "Tachograph inspection expiry as ISO 8601. Null for the 98.8% of vehicles that have no tachograph. It runs on its own cycle and is not the APK."},
+        {"name": "derived.tachograph_expired", "type": "boolean | null", "description": "Null, never false, when there is no tachograph date or no usable clock."},
+        {"name": "derived.tachograph_days_remaining", "type": "integer | null", "description": "Days until the tachograph expiry, negative once past."},
         {"name": "derived.first_admission", "type": "string | null", "description": "First admission to the road, ISO 8601."},
         {"name": "derived.age_days", "type": "integer | null", "description": "Days since first admission."},
         {"name": "derived.registered_since", "type": "string | null", "description": "Date of the current registration, ISO 8601."},
@@ -275,10 +293,19 @@ fn vehicle_derived() -> Value {
         {"name": "derived.co2_g_per_km", "type": "number | null", "description": "Combined CO2 in g/km."},
         {"name": "derived.co2_basis", "type": "string | null", "enum_note": "wltp | nedc", "description": "Which test cycle produced co2_g_per_km. The two are not comparable, so the figure is never reported without it."},
         {"name": "derived.electric_range_km", "type": "number | null"},
+        {"name": "derived.engine_cc", "type": "integer | null", "description": "Engine displacement in cm3. Null, never 0, for a vehicle with no combustion engine."},
+        {"name": "derived.energy_label", "type": "string | null", "enum_note": "A | B | C | D | E | F | G", "description": "RDW's fuel economy grade. Null for most of the register: 7.128M of the 7.130M vehicles that have one are passenger cars."},
         {"name": "derived.mass_empty_kg", "type": "integer | null"},
         {"name": "derived.mass_max_kg", "type": "integer | null"},
+        {"name": "derived.tow_braked_kg", "type": "integer | null", "description": "Maximum braked towing mass. Null, never 0, when the vehicle may not tow: RDW leaves the column out rather than zeroing it."},
+        {"name": "derived.tow_unbraked_kg", "type": "integer | null", "description": "Maximum unbraked towing mass."},
+        {"name": "derived.length_cm", "type": "integer | null", "description": "Length in cm. RDW writes 0 into this column where it has no measurement, which is reported here as null: 430,531 passenger cars carry a 0 and not one of them is zero centimetres long."},
+        {"name": "derived.width_cm", "type": "integer | null", "description": "Width in cm, with the same 0 for unmeasured resolved to null."},
+        {"name": "derived.height_cm", "type": "integer | null", "description": "Height in cm, with the same 0 for unmeasured resolved to null."},
+        {"name": "derived.vin_location", "type": "string | null", "description": "Where the VIN is stamped on the vehicle, in RDW's own abbreviated Dutch, e.g. 'r. tegen schutbord onder motorkap'. Left as written rather than expanded."},
         {"name": "derived.catalogue_price_eur", "type": "integer | null"},
         {"name": "derived.odometer", "type": "string | null", "description": "consistent, inconsistent, or no_judgement. Null when RDW recorded no verdict, which is not the same as no_judgement: RDW looked and declined to judge."},
+        {"name": "derived.odometer_year", "type": "integer | null", "description": "Year of the most recent odometer reading RDW registered, 1961 through the current year. Independent of the verdict, which carries no date of its own: a history last read in 2016 and one read this year say the same word, and 730,494 vehicles have a reading year with no verdict at all."},
         {"name": "derived.odometer_reason", "type": "string | null", "description": "RDW's own explanation of that verdict, resolved from the table embedded in this binary. Null when this build does not know the code."},
         {"name": "derived.insured", "type": "boolean | null", "description": "Third-party (WAM) insurance on record."},
         {"name": "derived.open_recall", "type": "boolean | null", "description": "Whether the register reports an unresolved recall."},

@@ -82,6 +82,21 @@ pub fn integer(row: &Value, key: &str) -> Option<i64> {
     n.is_finite().then(|| n.round() as i64)
 }
 
+/// Read a whole number from a column where RDW writes `0` for "not measured".
+///
+/// The three dimension columns do this: 430,531 passenger cars carry `lengte` 0,
+/// and not one of them is zero centimetres long. A zero there is a sentinel
+/// wearing a number, and reporting it would put `0 cm long` on a card.
+///
+/// Deliberately not the default, because most columns mean it. Counted against
+/// the live register: `cilinderinhoud`, `catalogusprijs`, both mass columns and
+/// both towing columns hold no zero at all in 16.8M rows, so RDW leaves them out
+/// rather than zeroing them, while `aantal_deuren` holds 1.95M zeroes, every one
+/// a true count of a trailer or a motorcycle.
+fn positive(row: &Value, key: &str) -> Option<i64> {
+    integer(row, key).filter(|n| *n > 0)
+}
+
 /// Read one of RDW's `Ja`/`Nee` indicator columns.
 ///
 /// Anything else, including a sentinel, is `None`. An indicator RDW did not
@@ -184,6 +199,11 @@ pub fn vehicle(item: &Value, today: Option<Date>) -> Value {
         (Some(today), Some(apk)) => Some(today.days_until(&apk)),
         _ => None,
     };
+    let tachograph = date(item, "vervaldatum_tachograaf");
+    let tachograph_remaining = match (today, tachograph) {
+        (Some(today), Some(expiry)) => Some(today.days_until(&expiry)),
+        _ => None,
+    };
     let admitted = date(item, "datum_eerste_toelating");
     let dutch = date(item, "datum_eerste_tenaamstelling_in_nederland");
     let fuels = fuel_rows(item);
@@ -206,11 +226,22 @@ pub fn vehicle(item: &Value, today: Option<Date>) -> Value {
         "kind": text(item, "voertuigsoort"),
         "eu_category": text(item, "europese_voertuigcategorie"),
         "body": text(item, "inrichting"),
+        "seats": integer(item, "aantal_zitplaatsen"),
+        // A zero door count is a fact rather than a gap: 1.95M vehicles on the
+        // register have none, being trailers and motorcycles, so it is read
+        // straight rather than through `positive`.
+        "doors": integer(item, "aantal_deuren"),
         "colour": text(item, "eerste_kleur"),
         "second_colour": text(item, "tweede_kleur"),
         "apk_expiry": apk.map(|d| d.iso()),
         "apk_expired": days_remaining.map(|d| d < 0),
         "apk_days_remaining": days_remaining,
+        // The second deadline the register dates itself. Only 209,400 vehicles
+        // have one, since a tachograph is a professional driver's instrument, but
+        // it expires on its own cycle and nothing else on the card shows it.
+        "tachograph_expiry": tachograph.map(|d| d.iso()),
+        "tachograph_expired": tachograph_remaining.map(|d| d < 0),
+        "tachograph_days_remaining": tachograph_remaining,
         "first_admission": admitted.map(|d| d.iso()),
         "age_days": match (today, admitted) {
             (Some(today), Some(admitted)) => Some(admitted.days_until(&today)),
@@ -227,10 +258,23 @@ pub fn vehicle(item: &Value, today: Option<Date>) -> Value {
         "co2_g_per_km": fuels.iter().filter_map(|r| co2(r).map(|(v, _)| v)).next(),
         "co2_basis": fuels.iter().filter_map(|r| co2(r).map(|(_, b)| b)).next(),
         "electric_range_km": fuels.iter().filter_map(electric_range_km).next(),
+        "engine_cc": integer(item, "cilinderinhoud"),
+        // RDW's own fuel economy grade. In practice only passenger cars carry
+        // one: 7,128,045 of the 7,129,545 vehicles that have one are cars.
+        "energy_label": text(item, "zuinigheidsclassificatie"),
         "mass_empty_kg": integer(item, "massa_ledig_voertuig"),
         "mass_max_kg": integer(item, "toegestane_maximum_massa_voertuig"),
+        "tow_braked_kg": integer(item, "maximum_trekken_massa_geremd"),
+        "tow_unbraked_kg": integer(item, "maximum_massa_trekken_ongeremd"),
+        "length_cm": positive(item, "lengte"),
+        "width_cm": positive(item, "breedte"),
+        "height_cm": positive(item, "hoogte_voertuig"),
+        "vin_location": text(item, "plaats_chassisnummer"),
         "catalogue_price_eur": integer(item, "catalogusprijs"),
         "odometer": odometer_judgement(item),
+        // What the verdict is worth depends on how recent the readings behind it
+        // are, and a verdict with no date reads as current whatever its age.
+        "odometer_year": integer(item, "jaar_laatste_registratie_tellerstand"),
         "odometer_reason": odometer_reason(item),
         "insured": flag(item, "wam_verzekerd"),
         "open_recall": open_recall,
@@ -829,6 +873,173 @@ mod tests {
             );
             assert_eq!(v["odometer_reason"], Value::Null, "code {code}");
         }
+    }
+
+    #[test]
+    fn a_dimension_rdw_did_not_measure_is_null_rather_than_zero_centimetres() {
+        // The three dimension columns use 0 for "not measured": 430,531
+        // passenger cars carry `lengte` 0, and not one of them is zero
+        // centimetres long.
+        let unmeasured = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "lengte": "0",
+                "breedte": "0",
+                "hoogte_voertuig": "0",
+            })),
+            None,
+        );
+        for key in ["length_cm", "width_cm", "height_cm"] {
+            assert_eq!(unmeasured[key], Value::Null, "{key}");
+        }
+
+        // The negative control: a rule that dropped every dimension would pass
+        // the assertions above and report nothing for any vehicle.
+        let measured = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "lengte": "645",
+                "breedte": "255",
+                "hoogte_voertuig": "400",
+            })),
+            None,
+        );
+        assert_eq!(measured["length_cm"], json!(645));
+        assert_eq!(measured["width_cm"], json!(255));
+        assert_eq!(measured["height_cm"], json!(400));
+
+        // Read one column at a time, so a row RDW measured the length of but
+        // not the height keeps the length.
+        let partial = vehicle(
+            &row(json!({"kenteken": "X99XXX", "lengte": "645", "hoogte_voertuig": "0"})),
+            None,
+        );
+        assert_eq!(partial["length_cm"], json!(645));
+        assert_eq!(partial["height_cm"], Value::Null);
+    }
+
+    #[test]
+    fn a_door_count_of_zero_is_a_count_and_not_an_absence() {
+        // 1.95M vehicles on the register have no doors, being trailers and
+        // motorcycles. Suppressing that zero the way an unmeasured dimension is
+        // suppressed would turn a fact into a silence.
+        let trailer = vehicle(
+            &row(json!({"kenteken": "X99XXX", "aantal_deuren": "0"})),
+            None,
+        );
+        assert_eq!(trailer["doors"], json!(0));
+
+        // A column RDW left out is still an absence, which is how it says it
+        // has no count: not one row in 16.8M writes a zero into the seat column.
+        let silent = vehicle(&row(json!({"kenteken": "X99XXX"})), None);
+        assert_eq!(silent["doors"], Value::Null);
+        assert_eq!(silent["seats"], Value::Null);
+
+        let counted = vehicle(
+            &row(json!({"kenteken": "X99XXX", "aantal_zitplaatsen": "5", "aantal_deuren": "4"})),
+            None,
+        );
+        assert_eq!(counted["seats"], json!(5));
+        assert_eq!(counted["doors"], json!(4));
+    }
+
+    #[test]
+    fn a_vehicle_with_no_tachograph_is_unknown_rather_than_current() {
+        // 98.8% of the register has no tachograph. Reporting `false` for them
+        // would say an instrument they have not got is in date.
+        let none = vehicle(
+            &row(json!({"kenteken": "X99XXX", "vervaldatum_apk": "20261109"})),
+            Date::new(2026, 8, 4),
+        );
+        assert_eq!(none["tachograph_expiry"], Value::Null);
+        assert_eq!(none["tachograph_expired"], Value::Null);
+        assert_eq!(none["tachograph_days_remaining"], Value::Null);
+    }
+
+    #[test]
+    fn the_tachograph_expiry_is_judged_on_its_own_cycle_and_not_the_apks() {
+        // A lorry can hold a current APK and an expired tachograph, which is
+        // the case a haulier runs this tool to find. Both are asserted, so
+        // reading one column for the other fails rather than passing on half.
+        let v = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "vervaldatum_apk": "20261109",
+                "vervaldatum_tachograaf": "20260301",
+            })),
+            Date::new(2026, 8, 4),
+        );
+        assert_eq!(v["apk_expiry"], "2026-11-09");
+        assert_eq!(v["apk_expired"], json!(false));
+        assert_eq!(v["tachograph_expiry"], "2026-03-01");
+        assert_eq!(v["tachograph_expired"], json!(true));
+        assert_eq!(v["tachograph_days_remaining"], json!(-156));
+
+        // Without a clock the date is reported and not judged, the same as the
+        // APK one line up.
+        let undated = vehicle(
+            &row(json!({"kenteken": "X99XXX", "vervaldatum_tachograaf": "20260301"})),
+            None,
+        );
+        assert_eq!(undated["tachograph_expiry"], "2026-03-01");
+        assert_eq!(undated["tachograph_expired"], Value::Null);
+    }
+
+    #[test]
+    fn the_odometer_year_stands_apart_from_the_verdict() {
+        // 730,494 vehicles carry a reading year with no verdict against it, and
+        // 12.7M carry a year at all. Tying one key to the other would drop the
+        // only odometer fact RDW has for the first group.
+        let both = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "tellerstandoordeel": "Logisch",
+                "jaar_laatste_registratie_tellerstand": "2016",
+            })),
+            None,
+        );
+        assert_eq!(both["odometer"], "consistent");
+        assert_eq!(both["odometer_year"], json!(2016));
+
+        let year_only = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "tellerstandoordeel": "Niet geregistreerd",
+                "jaar_laatste_registratie_tellerstand": "2016",
+            })),
+            None,
+        );
+        assert_eq!(year_only["odometer"], Value::Null);
+        assert_eq!(year_only["odometer_year"], json!(2016));
+
+        let verdict_only = vehicle(
+            &row(json!({"kenteken": "X99XXX", "tellerstandoordeel": "Logisch"})),
+            None,
+        );
+        assert_eq!(verdict_only["odometer"], "consistent");
+        assert_eq!(verdict_only["odometer_year"], Value::Null);
+    }
+
+    #[test]
+    fn the_towing_and_dimension_columns_are_read_as_the_units_rdw_records() {
+        let v = vehicle(
+            &row(json!({
+                "kenteken": "X99XXX",
+                "maximum_trekken_massa_geremd": "3500",
+                "maximum_massa_trekken_ongeremd": "750",
+                "cilinderinhoud": "2998",
+                "zuinigheidsclassificatie": "C",
+                "plaats_chassisnummer": "r. tegen schutbord onder motorkap",
+            })),
+            None,
+        );
+        assert_eq!(v["tow_braked_kg"], json!(3500));
+        assert_eq!(v["tow_unbraked_kg"], json!(750));
+        assert_eq!(v["engine_cc"], json!(2998));
+        assert_eq!(v["energy_label"], "C");
+        // RDW's own abbreviated Dutch, left as written: expanding it would be
+        // this tool inventing where to look for a stamped number.
+        assert_eq!(v["vin_location"], "r. tegen schutbord onder motorkap");
     }
 
     #[test]

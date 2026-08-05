@@ -10,14 +10,18 @@ stdout is a TTY, JSON when it is not, a machine-readable contract under
 ```console
 $ kenteken lookup X-99-XXX
 X-99-XXX   Iveco 35s14
-  Type               Bedrijfsauto (N1), neerklapbare zijschotten
+  Type               Bedrijfsauto (N1), neerklapbare zijschotten, 3 seats, 2
+                     doors
   APK expires        2027-12-11   in 1 year 4 months
   First admitted     2024-12-11   1 year 8 months ago
   Registered since   2024-12-11
   Fuel               Diesel, 100 kW, 243 g/km CO2 (WLTP)
+  Engine             2,287 cm3
   Mass               2,059 kg empty, 3,500 kg max
+  Towing             750 kg unbraked
+  Dimensions         691 cm long, 213 cm wide, 228 cm high
   Catalogue price    EUR 91,144
-  Odometer           consistent
+  Odometer           consistent   last reading 2024
   Insured (WAM)      yes
   Recall             none outstanding
 ```
@@ -49,7 +53,7 @@ never from the command line.
 
 | Command | What it returns |
 | --- | --- |
-| `lookup <PLATE>...` | Registration summary: make, model, APK expiry, masses, fuel, indicators |
+| `lookup <PLATE>...` | Registration summary: make, model, APK and tachograph expiry, masses, towing, dimensions, fuel, indicators |
 | `defects <PLATE>...` | Defects recorded at inspection, each code resolved to its description |
 | `fuel <PLATE>...` | Fuel and emissions rows, one per fuel for a hybrid or bifuel vehicle |
 | `recalls <PLATE>...` | Manufacturer recalls, open ones first, each resolved to the defect, the hazard and the repair |
@@ -231,25 +235,41 @@ $ kenteken lookup XXX-99-X --fields derived -o json
         "kind": "Personenauto",
         "eu_category": "M1",
         "body": "MPV",
+        "seats": 5,
+        "doors": 5,
         "colour": "ZWART",
         "second_colour": null,
         "apk_expiry": "2026-12-31",
         "apk_expired": false,
         "apk_days_remaining": 148,
+        "tachograph_expiry": null,
+        "tachograph_expired": null,
+        "tachograph_days_remaining": null,
         "first_admission": "2024-12-31",
         "age_days": 582,
         "registered_since": "2024-12-31",
         "first_dutch_registration": "2024-12-31",
         "dutch_registration_lag_days": 0,
-        "fuels": ["Elektriciteit"],
+        "fuels": [
+          "Elektriciteit"
+        ],
         "power_kw": 378.0,
         "co2_g_per_km": null,
         "co2_basis": null,
         "electric_range_km": 533.0,
+        "engine_cc": null,
+        "energy_label": null,
         "mass_empty_kg": 1954,
         "mass_max_kg": 2518,
+        "tow_braked_kg": 1600,
+        "tow_unbraked_kg": 750,
+        "length_cm": 475,
+        "width_cm": 192,
+        "height_cm": 162,
+        "vin_location": null,
         "catalogue_price_eur": 51990,
         "odometer": "consistent",
+        "odometer_year": 2026,
         "odometer_reason": "De geregistreerde tellerstand is steeds hoger dan de daarvoor geregistreerde tellerstand. Wij oordelen dan dat de tellerstand logisch verklaarbaar is.",
         "insured": true,
         "open_recall": false,
@@ -278,6 +298,20 @@ produced it, because a WLTP number and an NEDC number are not comparable.
 `apk_expired` is `null` rather than `false` when there is no expiry date: a
 vehicle that needs no inspection has not passed one.
 
+`tachograph_expiry` is a second deadline rather than a copy of the first. A
+tachograph is inspected on its own cycle by its own kind of workshop, so the two
+dates routinely disagree, and one can be long past while the other is
+comfortably in hand:
+
+```
+  APK expires          2025-11-21   EXPIRED 8 months ago
+  Tachograph expires   2026-03-01   EXPIRED 5 months ago
+```
+
+Most vehicles have no tachograph, and for them all three keys are `null`.
+`tachograph_expired` in particular is `null` rather than `false`, by the same
+rule as `apk_expired`: an instrument that does not exist has not stayed current.
+
 `open_recall_count` follows the same rule. Zero means the register says nothing
 is outstanding; `null` means the count is unknown, which is what a register
 saying a recall is open while no recall row came back actually is. Its hazards
@@ -292,11 +326,29 @@ a long gap usually means a vehicle came from abroad, but RDW does not say so,
 and a re-registration after a gap in ownership produces the same number. The
 two dates are reported as they are, and what they mean is left to the reader.
 
+`tow_braked_kg` and `tow_unbraked_kg` are the two halves of "can this pull my
+caravan", and they are not interchangeable: the braked figure assumes the
+trailer brakes itself, and is usually several times the unbraked one. Both are
+reported, labelled, and neither is presented as *the* towing capacity.
+
+`vin_location` says where on the vehicle the chassis number is stamped, which is
+what you want when you are standing next to a car rather than reading about one.
+It is left in RDW's own abbreviated Dutch, `r. op trekdriehoek 075 cm a. hart
+koppeling`, because expanding those abbreviations means guessing at them, and a
+wrong guess sends you looking at the wrong part of the vehicle.
+
 `odometer_reason` is RDW's own explanation of the odometer verdict, resolved
 from a table embedded in the binary, so it costs no request. Refresh it with
 `make update-tellerstand`. The summary card shows it only when the verdict is
 something other than `consistent`, since a paragraph explaining that all is
 well is noise; JSON always carries it.
+
+`odometer_year` is the year the readings behind that verdict stop, and it is
+reported beside the verdict because the verdict carries no date of its own. A
+history last read in 2016 and one read last month both say `consistent`, which
+is the same word about very different evidence. The two are independent in the
+register as well: 730,494 vehicles have a reading year and no verdict against
+it, so the card prints whichever half exists rather than dropping the line.
 
 RDW writes a placeholder into a column it has no value for rather than leaving
 it empty: `N.v.t.`, `Niet geregistreerd`, `Geen verstrekking in Open Data`,
@@ -304,6 +356,22 @@ it empty: `N.v.t.`, `Niet geregistreerd`, `Geen verstrekking in Open Data`,
 ten million single-colour vehicles a second colour, and a recall's contact
 column offers you `(Nog) niet bekend` as a phone number. The raw columns carry those strings verbatim, because that is
 what RDW sent; `derived` resolves them to `null`.
+
+A `0` can be a placeholder as well, and nothing but the column itself says
+which, so each one was counted against the live register rather than reasoned
+about:
+
+- `length_cm`, `width_cm` and `height_cm` are `null` when RDW wrote a zero.
+  430,531 passenger cars carry `lengte` 0, and not one of them is zero
+  centimetres long.
+- `doors` is read straight, because there a zero is a true count: 1,953,411
+  vehicles have no doors, being trailers and motorcycles.
+- `seats` needs neither rule. RDW omits the column rather than zeroing it, and
+  not one row in 16.8 million carries a `0`.
+
+`cilinderinhoud`, `catalogusprijs` and both the mass and towing columns behave
+like `seats`, holding no zero anywhere. So a card can say `0 doors`, and will
+never say `0 cm long`.
 
 ## Paging returns the same rows twice
 
