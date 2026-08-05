@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.4](https://github.com/rvben/kenteken/compare/v0.2.3...v0.2.4) - 2026-08-05
+
+### Fixed
+
+- **output**: say dataset descriptions and stderr notes in the reader's language ([777ae0e](https://github.com/rvben/kenteken/commit/777ae0edc9fd381fe7f3c0ee5a06217efb8db2c9))
+
 ## [0.2.3](https://github.com/rvben/kenteken/compare/v0.2.2...v0.2.3) - 2026-08-05
 
 ### Added
