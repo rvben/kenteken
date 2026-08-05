@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.2](https://github.com/rvben/kenteken/compare/v0.2.1...v0.2.2) - 2026-08-05
+
+### Added
+
+- **output**: give the lookup card a heading and grouped rows ([77b144d](https://github.com/rvben/kenteken/commit/77b144ddaab290695ae5867d5762de19c2b504cd))
+
+### Fixed
+
+- **facts**: report no electric range instead of 0 km on a diesel ([0b6b7eb](https://github.com/rvben/kenteken/commit/0b6b7ebbbc6806d4cb8c15685b983c0d3c7d39eb))
+- **facts**: keep model designations like XC40 out of title casing ([709db39](https://github.com/rvben/kenteken/commit/709db3989a96991103fc1c6b9e4cfb837b11ddfd))
+
 ## [0.2.1](https://github.com/rvben/kenteken/compare/v0.2.0...v0.2.1) - 2026-08-05
 
 ### Added
