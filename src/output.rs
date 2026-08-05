@@ -170,24 +170,51 @@ const WRAP: usize = 78;
 ///
 /// A value too wide for the card continues on the next line, indented to line up
 /// under itself, so a paragraph of RDW's prose stays readable beside its label.
-fn card(title: String, lines: Vec<(&str, String)>, style: Style) -> String {
-    let width = lines
+/// A titled block of labelled rows, in groups separated by a blank line.
+///
+/// Labels are padded to one width across every group, so the blank line
+/// separates the groups without breaking the single column the eye follows down
+/// the card. An empty group prints nothing, including its separator, so a
+/// vehicle RDW says little about does not gain a run of blank lines.
+///
+/// The heading is separated the same way, which is what makes it read as a
+/// heading rather than as a row whose label went missing. Bold alone cannot do
+/// that: it survives neither a pipe nor a terminal that declines to render it,
+/// and the layout has to hold on its own once the styling is gone.
+///
+/// `subtitle` arrives already indented, because where it sits depends on the
+/// title above it and only the caller knows how wide that is.
+fn card(
+    title: String,
+    subtitle: Option<String>,
+    groups: Vec<Vec<(&str, String)>>,
+    style: Style,
+) -> String {
+    let width = groups
         .iter()
+        .flatten()
         .map(|(l, _)| l.chars().count())
         .max()
         .unwrap_or(0);
     let indent = 2 + width + 3;
     let mut out = title;
     out.push('\n');
-    for (label, value) in lines {
-        let pad = " ".repeat(width - label.chars().count());
-        for (i, line) in wrap(&value, WRAP.saturating_sub(indent).max(24))
-            .into_iter()
-            .enumerate()
-        {
-            match i {
-                0 => out.push_str(&format!("  {}{pad}   {line}\n", style.dim(label))),
-                _ => out.push_str(&format!("{}{line}\n", " ".repeat(indent))),
+    if let Some(subtitle) = subtitle {
+        out.push_str(&subtitle);
+        out.push('\n');
+    }
+    for group in groups.iter().filter(|g| !g.is_empty()) {
+        out.push('\n');
+        for (label, value) in group {
+            let pad = " ".repeat(width - label.chars().count());
+            for (i, line) in wrap(value, WRAP.saturating_sub(indent).max(24))
+                .into_iter()
+                .enumerate()
+            {
+                match i {
+                    0 => out.push_str(&format!("  {}{pad}   {line}\n", style.dim(label))),
+                    _ => out.push_str(&format!("{}{line}\n", " ".repeat(indent))),
+                }
             }
         }
     }
@@ -255,62 +282,37 @@ fn vehicle_card(item: &Value, style: Style) -> String {
         false => format!("{plate}   {}", facts::title_case(&name)),
     });
 
-    let mut lines: Vec<(&str, String)> = Vec::new();
-    push(&mut lines, "Type", kind_line(d));
-    push(&mut lines, "APK expires", expiry_line(d, "apk", style));
+    // What the vehicle is, beneath the name it is known by. These facts
+    // identify it rather than describe its condition, and they belong to the
+    // heading for the same reason the make does. Aligned under the name, so the
+    // plate keeps the left edge to itself.
+    let subtitle = identity_line(d).map(|identity| {
+        let indent = visible_len(plate) + 3;
+        format!("{}{identity}", " ".repeat(indent))
+    });
+
+    // What the register says about where this vehicle stands: what falls due,
+    // what is wrong with it, and what it may still be used or sold for. First,
+    // because it is what a plate gets looked up for.
+    let mut status: Vec<(&str, String)> = Vec::new();
+    push(&mut status, "APK expires", expiry_line(d, "apk", style));
     push(
-        &mut lines,
+        &mut status,
         "Tachograph expires",
         expiry_line(d, "tachograph", style),
     );
-    push(
-        &mut lines,
-        "First admitted",
-        since_line(d, "first_admission", "age_days"),
-    );
-    push(
-        &mut lines,
-        "Registered since",
-        s(d, "registered_since").map(str::to_string),
-    );
-    push(&mut lines, "On the Dutch register", dutch_line(d));
-    push(&mut lines, "Colour", colour_line(d));
-    push(&mut lines, "Fuel", fuel_line(item));
-    push(
-        &mut lines,
-        "Engine",
-        n(d, "engine_cc").map(|cc| format!("{} cm3", facts::thousands(cc as i64))),
-    );
-    push(
-        &mut lines,
-        "Energy label",
-        s(d, "energy_label").map(str::to_string),
-    );
-    push(&mut lines, "Mass", mass_line(d));
-    push(&mut lines, "Towing", towing_line(d));
-    push(&mut lines, "Dimensions", dimensions_line(d));
-    push(
-        &mut lines,
-        "VIN location",
-        s(d, "vin_location").map(str::to_string),
-    );
-    push(
-        &mut lines,
-        "Catalogue price",
-        n(d, "catalogue_price_eur").map(|p| format!("EUR {}", facts::thousands(p as i64))),
-    );
-    push(&mut lines, "Odometer", odometer_line(d, style));
-    push(&mut lines, "Odometer note", odometer_reason_line(d));
-    push(&mut lines, "Insured (WAM)", insured_line(d, style));
-    push(&mut lines, "Recall", recall_line(d, style));
-    push(&mut lines, "Recall hazard", recall_hazard_line(d));
+    push(&mut status, "Odometer", odometer_line(d, style));
+    push(&mut status, "Odometer note", odometer_reason_line(d));
+    push(&mut status, "Insured (WAM)", insured_line(d, style));
+    push(&mut status, "Recall", recall_line(d, style));
+    push(&mut status, "Recall hazard", recall_hazard_line(d));
     // Shown only when set. An exceptional flag that is off is not worth a line,
     // and the tri-state that keeps "off" apart from "not reported" is in the
     // derived block for anything that needs to tell them apart.
-    push(&mut lines, "Exported", when(b(d, "exported"), "yes"));
-    push(&mut lines, "Taxi", when(b(d, "taxi"), "yes"));
+    push(&mut status, "Exported", when(b(d, "exported"), "yes"));
+    push(&mut status, "Taxi", when(b(d, "taxi"), "yes"));
     push(
-        &mut lines,
+        &mut status,
         "Registration",
         when(
             b(d, "transferable").map(|t| !t),
@@ -318,7 +320,61 @@ fn vehicle_card(item: &Value, style: Style) -> String {
         ),
     );
 
-    card(title, lines, style)
+    // The vehicle's dates, oldest first, so the three read as one sequence.
+    let mut history: Vec<(&str, String)> = Vec::new();
+    push(
+        &mut history,
+        "First admitted",
+        since_line(d, "first_admission", "age_days"),
+    );
+    push(&mut history, "On the Dutch register", dutch_line(d));
+    push(
+        &mut history,
+        "Registered since",
+        s(d, "registered_since").map(str::to_string),
+    );
+
+    // What it is made of and what it can carry: the figures that do not change
+    // between one lookup and the next.
+    let mut spec: Vec<(&str, String)> = Vec::new();
+    push(&mut spec, "Fuel", fuel_line(item));
+    push(
+        &mut spec,
+        "Engine",
+        n(d, "engine_cc").map(|cc| format!("{} cm3", facts::thousands(cc as i64))),
+    );
+    push(
+        &mut spec,
+        "Energy label",
+        s(d, "energy_label").map(str::to_string),
+    );
+    push(&mut spec, "Mass", mass_line(d));
+    push(&mut spec, "Towing", towing_line(d));
+    push(&mut spec, "Dimensions", dimensions_line(d));
+    push(
+        &mut spec,
+        "Catalogue price",
+        n(d, "catalogue_price_eur").map(|p| format!("EUR {}", facts::thousands(p as i64))),
+    );
+    push(
+        &mut spec,
+        "VIN location",
+        s(d, "vin_location").map(str::to_string),
+    );
+
+    card(title, subtitle, vec![status, history, spec], style)
+}
+
+/// What the vehicle is, as one line: kind, body, capacity and colour.
+///
+/// Four labelled rows would say the same thing and cost the card four lines to
+/// answer a question nobody asks one part of at a time.
+fn identity_line(d: &Value) -> Option<String> {
+    let parts: Vec<String> = [kind_line(d), colour_line(d)]
+        .into_iter()
+        .flatten()
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// One recall, as the card `kenteken recalls` prints.
@@ -358,7 +414,9 @@ fn recall_card(item: &Value, style: Style) -> String {
         "Owners informed",
         s(d, "owners_informed").map(str::to_string),
     );
-    card(title, lines, style)
+    // One group: a recall is a single account of one fault, and splitting it
+    // would put gaps between sentences that are read together.
+    card(title, None, vec![lines], style)
 }
 
 /// Whether this recall is still outstanding, said in words.
@@ -1171,7 +1229,11 @@ mod tests {
             "tweede_kleur": "Niet geregistreerd",
         }]));
         let rendered = plain(&env, &lookup());
-        assert!(rendered.contains("Colour"), "rendered:\n{rendered}");
+        // Anchored on the colour rather than on a label, because the colour is
+        // part of the heading and carries no label of its own. This also keeps
+        // the negative below honest: a card that dropped the colour entirely
+        // would satisfy "no slash" while saying nothing.
+        assert!(rendered.contains("Zwart"), "rendered:\n{rendered}");
         assert!(
             !rendered.contains('/'),
             "a second colour was invented:\n{rendered}"
