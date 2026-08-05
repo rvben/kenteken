@@ -25,7 +25,7 @@ X-99-XXX   Iveco 35s14
 Anything that should stop you is shouted in words, not just coloured, so it
 survives being piped, redirected or read by someone who cannot tell red from
 grey: `EXPIRED`, `NOT INSURED`, `OPEN RECALL`, `INCONSISTENT`,
-`TRANSFER BLOCKED`.
+`TRANSFER BLOCKED`, `TACHOGRAPH TAMPERING`.
 
 ## Install
 
@@ -52,6 +52,8 @@ never from the command line.
 | `lookup <PLATE>...` | Registration summary: make, model, APK expiry, masses, fuel, indicators |
 | `defects <PLATE>...` | Defects recorded at inspection, each code resolved to its description |
 | `fuel <PLATE>...` | Fuel and emissions rows, one per fuel for a hybrid or bifuel vehicle |
+| `recalls <PLATE>...` | Manufacturer recalls, open ones first, each resolved to the defect, the hazard and the repair |
+| `inspections <PLATE>...` | Notifications filed by inspection bodies, and the expiry each one produced |
 | `raw <DATASET> <PLATE>...` | Rows from any known RDW dataset, exactly as RDW returned them |
 | `datasets` | The datasets this build knows. Makes no network request |
 | `schema` | The machine-readable contract, as JSON |
@@ -87,6 +89,83 @@ appears only when more than one plate was asked for.
 
 Refresh the table from RDW with `make update-gebreken`, which writes
 `data/gebreken.json` as a reviewable diff.
+
+### Recalls
+
+A recall is spread over three RDW datasets: one says which recalls a plate is
+subject to and whether each is repaired, one describes the recall, and one lists
+what it can cause. `recalls` reads all three and prints a card per recall:
+
+```console
+$ kenteken recalls 9-XXXX-9
+9-XXXX-9   MGP070060   OPEN
+  Defect             De mogelijkheid bestaat dat de bouten van de
+                     stuurkoppeling op de stuuras niet goed zijn vast
+                     gedraaid.
+  Category           Motorrijtuigen en aanhangwagens - stuurinrichting
+  Hazard             Een (verkeers)ongeval met letselschade
+  Consequences       De kans bestaat dat de verbinding van de stuurkoppeling
+                     op de stuuras los gaat zitten. Dit kan worden herkend
+                     door optredend geluid tijdens inparkeren en manouvreren
+                     bij lage snelheid. Na verloop van tijd kan dit leiden tot
+                     losraken van deze koppeling en onbestuurbaar worden van
+                     het voertuig.
+  Repair             De producent roept de betreffende voertuigen terug, neemt
+                     maatregelen om het defect te verhelpen. De
+                     voertuigeigenaar wordt uitgenodigd een afspraak te maken
+                     met een merkdealer. De dealer zal de stuurkoppeling dan
+                     vervangen.
+  Reported by        Louwman Parts & Service B.V.
+  More information   0162-585217
+  Published          2013-03-28   7,500 vehicles in the action
+  Owners informed    2007-11-06
+```
+
+RDW's prose is passed through in Dutch, untranslated and unabridged, because a
+paraphrase of a safety instruction is a liability rather than a convenience. It
+is rewrapped to the terminal under its label, and a paragraph stays whole.
+
+Open recalls come first, so a page cut short by `--limit` shows what is still
+outstanding rather than what was repaired years ago. A recall RDW has not
+published detail for still names itself, its status and its reference.
+
+A vehicle card names the hazard and points here, on two lines rather than one,
+because a hazard is a sentence and a sentence joined to a shouted status wraps
+into a run-on phrase:
+
+```
+  Recall             OPEN RECALL   see: kenteken recalls 9-XXXX-9
+  Recall hazard      Een (verkeers)ongeval met letselschade
+```
+
+That card asks about recalls only when the register says one is outstanding, so
+an ordinary lookup still costs the two requests it always did.
+
+### Inspections
+
+Every notification an inspection body filed about the vehicle, newest first, and
+the expiry date it produced:
+
+```console
+$ kenteken inspections 9-XXX-99
+DATE        NOTIFICATION         FILED BY              VALID UNTIL
+2024-11-21  periodieke controle  APK Zware voertuigen  2025-11-21
+2024-02-29  periodieke controle  APK Zware voertuigen  2025-03-01
+2024-02-29  periodieke controle  Controleapparaten     2026-03-01
+```
+
+Two bodies filing on one day is normal, and the two dates they set are not the
+same kind of date: the APK station's expires a year out, the tachograph
+workshop's two. The column is `VALID UNTIL` rather than `APK until` for exactly
+that reason, and the expiry belongs to the notification rather than to the
+vehicle.
+
+Inspection bodies file five kinds of notification. Three are routine
+(`periodieke controle`, `inbouw`, `uitbouw`); the other two, `manipulatie tacho`
+and `zegelverbreking tacho`, mean someone interfered with the instrument that
+records a professional driver's hours. Those two are shouted, as
+`TACHOGRAPH TAMPERING` and `TACHOGRAPH SEAL BROKEN`, and carry a stable
+`derived.alarm` for a consumer that would rather match a value than a phrase.
 
 ### Raw datasets
 
@@ -160,6 +239,8 @@ $ kenteken lookup XXX-99-X --fields derived -o json
         "first_admission": "2024-12-31",
         "age_days": 582,
         "registered_since": "2024-12-31",
+        "first_dutch_registration": "2024-12-31",
+        "dutch_registration_lag_days": 0,
         "fuels": ["Elektriciteit"],
         "power_kw": 378.0,
         "co2_g_per_km": null,
@@ -169,8 +250,11 @@ $ kenteken lookup XXX-99-X --fields derived -o json
         "mass_max_kg": 2518,
         "catalogue_price_eur": 51990,
         "odometer": "consistent",
+        "odometer_reason": "De geregistreerde tellerstand is steeds hoger dan de daarvoor geregistreerde tellerstand. Wij oordelen dan dat de tellerstand logisch verklaarbaar is.",
         "insured": true,
         "open_recall": false,
+        "open_recall_count": 0,
+        "open_recall_hazards": [],
         "exported": false,
         "taxi": true,
         "transferable": true
@@ -194,10 +278,31 @@ produced it, because a WLTP number and an NEDC number are not comparable.
 `apk_expired` is `null` rather than `false` when there is no expiry date: a
 vehicle that needs no inspection has not passed one.
 
+`open_recall_count` follows the same rule. Zero means the register says nothing
+is outstanding; `null` means the count is unknown, which is what a register
+saying a recall is open while no recall row came back actually is. Its hazards
+are `null` in that case too, since an empty list would read as "nothing to
+worry about". `open_recall_hazards` lists each hazard once, in the order met:
+RDW files one row per hazard, so a single recall routinely names several and two
+recalls on one vehicle often name the same one twice.
+
+`dutch_registration_lag_days` is the gap between first admission anywhere and
+first registration in the Netherlands. It is a day count and not an import flag:
+a long gap usually means a vehicle came from abroad, but RDW does not say so,
+and a re-registration after a gap in ownership produces the same number. The
+two dates are reported as they are, and what they mean is left to the reader.
+
+`odometer_reason` is RDW's own explanation of the odometer verdict, resolved
+from a table embedded in the binary, so it costs no request. Refresh it with
+`make update-tellerstand`. The summary card shows it only when the verdict is
+something other than `consistent`, since a paragraph explaining that all is
+well is noise; JSON always carries it.
+
 RDW writes a placeholder into a column it has no value for rather than leaving
-it empty: `N.v.t.`, `Niet geregistreerd`, or `Geen verstrekking in Open Data`.
-Read naively, `tweede_kleur` alone gives ten million single-colour vehicles a
-second colour. The raw columns carry those strings verbatim, because that is
+it empty: `N.v.t.`, `Niet geregistreerd`, `Geen verstrekking in Open Data`,
+`Niet bekend` or `(Nog) niet bekend`. Read naively, `tweede_kleur` alone gives
+ten million single-colour vehicles a second colour, and a recall's contact
+column offers you `(Nog) niet bekend` as a phone number. The raw columns carry those strings verbatim, because that is
 what RDW sent; `derived` resolves them to `null`.
 
 ## Paging returns the same rows twice
@@ -217,7 +322,7 @@ were withheld.
 
 ```console
 $ kenteken -o ndjson --limit 2 --quiet datasets 2>&1 >/dev/null
-{"total":13,"truncated":true,"not_found":[],"no_rows":[]}
+{"total":18,"truncated":true,"not_found":[],"no_rows":[]}
 ```
 
 ## Absent, empty and missing are three different answers
@@ -239,8 +344,10 @@ A field RDW did not report is left out rather than rendered as `0` or an empty
 string: `null` in JSON, `-` in a table cell, and no line at all on a summary
 card, since a confident-looking label next to nothing is worse than silence.
 
-`defects` and `fuel` therefore read the vehicle register as well, purely to tell
-a typo from a clean bill of health.
+Any command reading a dataset other than the register therefore reads the
+register as well, purely to tell a typo from a clean bill of health. Without it,
+`recalls XX-99-XX` on a mistyped plate would answer "no recalls", which is
+exactly what you were hoping to read about a car that does not exist.
 
 ## Exit codes
 
@@ -278,7 +385,12 @@ RDW is a free public service, so the tool is deliberately quiet:
   `retryable` and the caller decides.
 - `--concurrency` (default 4) is capped at 8.
 - Malformed plates and datasets with no `kenteken` column are refused locally.
-- `defects` needs no second request for the code table; it is embedded.
+- `defects` needs no second request for the code table; it is embedded, and so
+  is the odometer table `lookup` reads.
+- `lookup` asks about recalls only when the register says one is outstanding.
+- Recalls are named by reference and described elsewhere. Every reference a run
+  collected is resolved together: one request per recall dataset, whether that
+  is one recall or forty.
 
 ## Development
 
