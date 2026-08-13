@@ -5,7 +5,7 @@ Look up Dutch vehicle data by licence plate, from the [RDW open data API](https:
 Built for humans at a terminal and for agents reading a pipe, equally: text when
 stdout is a TTY, JSON when it is not, a machine-readable contract under
 `kenteken schema`, and structured errors on stderr. It follows
-[The CLI Spec](https://clispec.dev) v0.2.
+[The CLI Spec](https://clispec.dev) v0.3.
 
 ```console
 $ kenteken lookup X-99-XXX

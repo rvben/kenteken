@@ -36,11 +36,11 @@ fn error_envelope(stderr: &str) -> Value {
 }
 
 #[test]
-fn schema_is_clispec_v0_2_on_stdout() {
+fn schema_is_clispec_v0_3_on_stdout() {
     let out = run(&["schema"]);
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     let v: Value = serde_json::from_str(&out.stdout).expect("schema is JSON");
-    assert_eq!(v["clispec"], "0.2");
+    assert_eq!(v["clispec"], "0.3");
     assert_eq!(v["name"], "kenteken");
     assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
 }

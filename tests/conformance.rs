@@ -1,5 +1,5 @@
-//! `kenteken schema` must validate against the published clispec v0.2 JSON
-//! Schema (vendored at schemas/clispec-v0.2.json).
+//! `kenteken schema` must validate against the published clispec v0.3 JSON
+//! Schema (vendored at schemas/clispec-v0.3.json).
 
 use serde_json::Value;
 
@@ -8,8 +8,8 @@ fn contract() -> Value {
 }
 
 #[test]
-fn schema_conforms_to_clispec_v0_2() {
-    let schema: Value = serde_json::from_str(include_str!("../schemas/clispec-v0.2.json"))
+fn schema_conforms_to_clispec_v0_3() {
+    let schema: Value = serde_json::from_str(include_str!("../schemas/clispec-v0.3.json"))
         .expect("vendored clispec schema is valid JSON");
 
     let instance = contract();
@@ -21,7 +21,7 @@ fn schema_conforms_to_clispec_v0_2() {
             .map(|e| format!("{} at {}", e, e.instance_path()))
             .collect();
         panic!(
-            "kenteken schema does not conform to clispec v0.2:\n{}",
+            "kenteken schema does not conform to clispec v0.3:\n{}",
             errors.join("\n")
         );
     }
@@ -31,7 +31,7 @@ fn schema_conforms_to_clispec_v0_2() {
 fn the_vendored_schema_rejects_a_document_it_should_reject() {
     // Negative control. Without it, a validator that accepts everything would
     // make the test above pass no matter what the contract said.
-    let schema: Value = serde_json::from_str(include_str!("../schemas/clispec-v0.2.json")).unwrap();
+    let schema: Value = serde_json::from_str(include_str!("../schemas/clispec-v0.3.json")).unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
 
     let mut broken = contract();
@@ -46,7 +46,7 @@ fn the_vendored_schema_rejects_a_document_it_should_reject() {
 #[test]
 fn schema_declares_the_expected_shape() {
     let v = contract();
-    assert_eq!(v["clispec"], "0.2");
+    assert_eq!(v["clispec"], "0.3");
     assert_eq!(v["name"], "kenteken");
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
 

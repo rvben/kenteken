@@ -1,7 +1,7 @@
-//! The clispec v0.2 contract emitted by `kenteken schema`.
+//! The clispec v0.3 candidate contract emitted by `kenteken schema`.
 //!
-//! Conforms to <https://clispec.dev/schema/v0.2.json> (validated by a test
-//! against the vendored copy in `schemas/clispec-v0.2.json`).
+//! Conforms to <https://clispec.dev/schema/v0.3.json> (validated by a test
+//! against the vendored copy in `schemas/clispec-v0.3.json`).
 //!
 //! The contract is written by hand rather than derived from the clap tree,
 //! because it declares things clap does not know: which exit code means what,
@@ -17,7 +17,7 @@ use crate::error::EXIT_PARTIAL;
 use serde_json::{Value, json};
 
 /// The version of The CLI Spec this document conforms to.
-pub const CLISPEC_VERSION: &str = "0.2";
+pub const CLISPEC_VERSION: &str = "0.3";
 
 /// Build the clispec contract as a JSON value.
 pub fn contract() -> Value {
@@ -26,6 +26,7 @@ pub fn contract() -> Value {
         "name": "kenteken",
         "version": env!("CARGO_PKG_VERSION"),
         "description": env!("CARGO_PKG_DESCRIPTION"),
+        "output": {"tty": "text", "piped": "json"},
         "global_args": global_args(),
         "commands": commands(),
         "errors": errors(),
@@ -43,6 +44,7 @@ fn global_args() -> Value {
     json!([
         {
             "name": "--output",
+            "short": "-o",
             "type": "string",
             "enum": ["auto", "json", "text", "yaml", "ndjson"],
             "default": "auto",
@@ -98,7 +100,10 @@ fn commands() -> Value {
         {
             "name": "lookup",
             "description": "Registration summary for one or more plates, enriched with the vehicle's fuel rows.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "bounded",
+            "fields_arg": "--fields",
             "stability": "stable",
             "args": [plates_arg()],
             "output_fields": vehicle_fields()
@@ -106,7 +111,10 @@ fn commands() -> Value {
         {
             "name": "defects",
             "description": "Defects recorded at inspection, with each defect code resolved to its description.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "bounded",
+            "fields_arg": "--fields",
             "stability": "stable",
             "args": [plates_arg()],
             "output_fields": defect_fields()
@@ -114,7 +122,10 @@ fn commands() -> Value {
         {
             "name": "fuel",
             "description": "Fuel and emissions rows. A hybrid or bifuel vehicle has one row per fuel.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "bounded",
+            "fields_arg": "--fields",
             "stability": "stable",
             "args": [plates_arg()],
             "output_fields": fuel_fields()
@@ -122,7 +133,10 @@ fn commands() -> Value {
         {
             "name": "recalls",
             "description": "Manufacturer recalls for a vehicle, open ones first, each resolved from its reference code to the defect, the hazard, the repair and who to contact. Repaired recalls are listed too, so the absence of an open one is visible as a fact rather than as an empty result.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "bounded",
+            "fields_arg": "--fields",
             "stability": "stable",
             "args": [plates_arg()],
             "output_fields": recall_fields()
@@ -130,7 +144,10 @@ fn commands() -> Value {
         {
             "name": "inspections",
             "description": "Notifications filed against a vehicle by inspection bodies, newest first: periodic inspections, tachograph fitting and removal, and tachograph findings.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "bounded",
+            "fields_arg": "--fields",
             "stability": "stable",
             "args": [plates_arg()],
             "output_fields": inspection_fields()
@@ -138,7 +155,12 @@ fn commands() -> Value {
         {
             "name": "raw",
             "description": "Rows from any known RDW dataset, exactly as RDW returned them.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "unbounded",
+            "pagination": {"style": "offset", "limit_arg": "--limit", "offset_arg": "--offset"},
+            "fields_arg": "--fields",
+            "stdout_schema": {},
             "stability": "stable",
             "args": [
                 {
@@ -153,7 +175,9 @@ fn commands() -> Value {
         {
             "name": "datasets",
             "description": "List the RDW datasets this build knows. Makes no network request.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "bounded",
             "stability": "stable",
             "output_fields": [
                 {"name": "id", "type": "string", "description": "Socrata four-by-four resource id."},
@@ -161,18 +185,25 @@ fn commands() -> Value {
                 {"name": "description", "type": "string", "description": "What the dataset holds."},
                 {"name": "plate_keyed", "type": "boolean", "description": "Whether the dataset can be queried by kenteken."},
                 {"name": "order", "type": "string", "description": "SoQL $order sent with every query to this dataset. Socrata leaves an unsorted result's order undefined, so this is what makes --limit and --offset return the same rows twice. Datasets of events are newest first."}
-            ]
+            ],
+            "example": {"args": ["datasets"]}
         },
         {
             "name": "schema",
             "description": "Print this clispec contract as JSON.",
+            "effects": "read_only",
             "mutating": false,
+            "cardinality": "single",
+            "stdout_schema": {"$ref": "https://clispec.dev/schema/v0.3.json"},
             "stability": "stable"
         },
         {
             "name": "completions",
             "description": "Generate a shell completion script.",
+            "effects": "read_only",
             "mutating": false,
+            "output_kind": "opaque",
+            "media_type": "text/plain",
             "stability": "stable",
             "args": [
                 {
@@ -265,8 +296,8 @@ fn vehicle_columns() -> Value {
         {"name": "tenaamstellen_mogelijk", "type": "string", "description": "Whether the registration can be transferred (Ja/Nee)."},
         {"name": "datum_eerste_tenaamstelling_in_nederland", "type": "string", "description": "First registration in the Netherlands, YYYYMMDD. Later than datum_eerste_toelating for a vehicle first admitted abroad."},
         {"name": "code_toelichting_tellerstandoordeel", "type": "string", "description": "RDW's code for why the odometer was judged as it was; see derived.odometer_reason."},
-        {"name": "fuel", "type": "array", "description": "The vehicle's fuel rows, added by this tool. Empty when RDW records none."},
-        {"name": "recalls", "type": "array", "description": "The vehicle's open recalls, added by this tool, in the shape `recalls` returns. Empty both when there are none and when the register reported one this run could not resolve; derived.open_recall_count tells the two apart. Repaired recalls are not here; `kenteken recalls` lists those."}
+        {"name": "fuel", "type": "array", "items": {"type": "object"}, "description": "The vehicle's fuel rows, added by this tool. Empty when RDW records none."},
+        {"name": "recalls", "type": "array", "items": {"type": "object"}, "description": "The vehicle's open recalls, added by this tool, in the shape `recalls` returns. Empty both when there are none and when the register reported one this run could not resolve; derived.open_recall_count tells the two apart. Repaired recalls are not here; `kenteken recalls` lists those."}
     ])
 }
 
@@ -274,53 +305,53 @@ fn vehicle_columns() -> Value {
 fn vehicle_derived() -> Value {
     json!([
         {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the row. Every key below is always present; a fact RDW did not supply is null and never a stand-in value.")},
-        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form, e.g. X-99-XXX."},
-        {"name": "derived.make", "type": "string | null"},
-        {"name": "derived.model", "type": "string | null"},
-        {"name": "derived.kind", "type": "string | null", "description": "Vehicle kind, e.g. Personenauto."},
-        {"name": "derived.eu_category", "type": "string | null", "description": "EU category, e.g. M1."},
-        {"name": "derived.body", "type": "string | null", "description": "Body style, e.g. hatchback."},
-        {"name": "derived.seats", "type": "integer | null", "description": "Number of seats. RDW omits the column rather than writing a zero here: not one row in 16.8M carries a 0, against 3.35M that leave it out."},
-        {"name": "derived.doors", "type": "integer | null", "description": "Zero is a true count and not an absence: 1.95M vehicles on the register have no doors, being trailers and motorcycles."},
-        {"name": "derived.colour", "type": "string | null"},
-        {"name": "derived.second_colour", "type": "string | null", "description": "Null for a single-tone vehicle, which is most of them."},
-        {"name": "derived.apk_expiry", "type": "string | null", "description": "APK expiry as ISO 8601. Null when the vehicle needs no inspection."},
-        {"name": "derived.apk_expired", "type": "boolean | null", "description": "Null, never false, when there is no expiry date or no usable clock: a vehicle that needs no inspection has not passed one. Measured against the Dutch calendar day."},
-        {"name": "derived.apk_days_remaining", "type": "integer | null", "description": "Days until expiry, negative once past. Null when apk_expired is null."},
-        {"name": "derived.tachograph_expiry", "type": "string | null", "description": "Tachograph inspection expiry as ISO 8601. Null for the 98.8% of vehicles that have no tachograph. It runs on its own cycle and is not the APK."},
-        {"name": "derived.tachograph_expired", "type": "boolean | null", "description": "Null, never false, when there is no tachograph date or no usable clock."},
-        {"name": "derived.tachograph_days_remaining", "type": "integer | null", "description": "Days until the tachograph expiry, negative once past."},
-        {"name": "derived.first_admission", "type": "string | null", "description": "First admission to the road, ISO 8601."},
-        {"name": "derived.age_days", "type": "integer | null", "description": "Days since first admission."},
-        {"name": "derived.registered_since", "type": "string | null", "description": "Date of the current registration, ISO 8601."},
-        {"name": "derived.first_dutch_registration", "type": "string | null", "description": "First registration in the Netherlands, ISO 8601."},
-        {"name": "derived.dutch_registration_lag_days", "type": "integer | null", "description": "Days between first admission to the road and first Dutch registration. A positive number means the vehicle was on the road elsewhere first, which usually but not always means an import: RDW publishes no import flag, so this is the gap and not a verdict."},
-        {"name": "derived.fuels", "type": "string[]", "description": "Every fuel the vehicle runs on, in RDW's sequence. Empty when RDW records none."},
-        {"name": "derived.power_kw", "type": "number | null", "description": "Net maximum power of the primary fuel, in kW. Read from the electric power column when that is the one RDW filled in."},
-        {"name": "derived.co2_g_per_km", "type": "number | null", "description": "Combined CO2 in g/km."},
-        {"name": "derived.co2_basis", "type": "string | null", "enum_note": "wltp | nedc", "description": "Which test cycle produced co2_g_per_km. The two are not comparable, so the figure is never reported without it."},
-        {"name": "derived.electric_range_km", "type": "number | null", "description": "Electric range in km. Null, never 0, for a vehicle with no electric drive: RDW writes 0 into actieradius where the column does not apply, and 315,417 of those zeroes sit on diesel rows."},
-        {"name": "derived.engine_cc", "type": "integer | null", "description": "Engine displacement in cm3. Null, never 0, for a vehicle with no combustion engine."},
-        {"name": "derived.energy_label", "type": "string | null", "enum_note": "A | B | C | D | E | F | G", "description": "RDW's fuel economy grade. Null for most of the register: 7.128M of the 7.130M vehicles that have one are passenger cars."},
-        {"name": "derived.mass_empty_kg", "type": "integer | null"},
-        {"name": "derived.mass_max_kg", "type": "integer | null"},
-        {"name": "derived.tow_braked_kg", "type": "integer | null", "description": "Maximum braked towing mass. Null, never 0, when the vehicle may not tow: RDW leaves the column out rather than zeroing it."},
-        {"name": "derived.tow_unbraked_kg", "type": "integer | null", "description": "Maximum unbraked towing mass."},
-        {"name": "derived.length_cm", "type": "integer | null", "description": "Length in cm. RDW writes 0 into this column where it has no measurement, which is reported here as null: 430,531 passenger cars carry a 0 and not one of them is zero centimetres long."},
-        {"name": "derived.width_cm", "type": "integer | null", "description": "Width in cm, with the same 0 for unmeasured resolved to null."},
-        {"name": "derived.height_cm", "type": "integer | null", "description": "Height in cm, with the same 0 for unmeasured resolved to null."},
-        {"name": "derived.vin_location", "type": "string | null", "description": "Where the VIN is stamped on the vehicle, in RDW's own abbreviated Dutch, e.g. 'r. tegen schutbord onder motorkap'. Left as written rather than expanded."},
-        {"name": "derived.catalogue_price_eur", "type": "integer | null"},
-        {"name": "derived.odometer", "type": "string | null", "description": "consistent, inconsistent, or no_judgement. Null when RDW recorded no verdict, which is not the same as no_judgement: RDW looked and declined to judge."},
-        {"name": "derived.odometer_year", "type": "integer | null", "description": "Year of the most recent odometer reading RDW registered, 1961 through the current year. Independent of the verdict, which carries no date of its own: a history last read in 2016 and one read this year say the same word, and 730,494 vehicles have a reading year with no verdict at all."},
-        {"name": "derived.odometer_reason", "type": "string | null", "description": "RDW's own explanation of that verdict, resolved from the table embedded in this binary. Null when this build does not know the code."},
-        {"name": "derived.insured", "type": "boolean | null", "description": "Third-party (WAM) insurance on record."},
-        {"name": "derived.open_recall", "type": "boolean | null", "description": "Whether the register reports an unresolved recall."},
-        {"name": "derived.open_recall_count", "type": "integer | null", "description": "How many open recalls this run resolved. Null means the count is unknown, never that there are none: a register saying a recall is open while no recall row came back is a gap in the answer. Zero is only reported when RDW said there is no open recall."},
-        {"name": "derived.open_recall_hazards", "type": "string[] | null", "description": "The hazards those recalls name, deduplicated. Null whenever open_recall_count is null, so an unresolved recall never reads as no hazards."},
-        {"name": "derived.exported", "type": "boolean | null"},
-        {"name": "derived.taxi", "type": "boolean | null"},
-        {"name": "derived.transferable", "type": "boolean | null", "description": "Whether the registration can be transferred."}
+        {"name": "derived.plate", "type": "string", "description": "Plate in its readable grouped form, e.g. X-99-XXX."},
+        {"name": "derived.make", "type": "string"},
+        {"name": "derived.model", "type": "string"},
+        {"name": "derived.kind", "type": "string", "description": "Vehicle kind, e.g. Personenauto."},
+        {"name": "derived.eu_category", "type": "string", "description": "EU category, e.g. M1."},
+        {"name": "derived.body", "type": "string", "description": "Body style, e.g. hatchback."},
+        {"name": "derived.seats", "type": "integer", "description": "Number of seats. RDW omits the column rather than writing a zero here: not one row in 16.8M carries a 0, against 3.35M that leave it out."},
+        {"name": "derived.doors", "type": "integer", "description": "Zero is a true count and not an absence: 1.95M vehicles on the register have no doors, being trailers and motorcycles."},
+        {"name": "derived.colour", "type": "string"},
+        {"name": "derived.second_colour", "type": "string", "description": "Null for a single-tone vehicle, which is most of them."},
+        {"name": "derived.apk_expiry", "type": "string", "description": "APK expiry as ISO 8601. Null when the vehicle needs no inspection."},
+        {"name": "derived.apk_expired", "type": "boolean", "description": "Null, never false, when there is no expiry date or no usable clock: a vehicle that needs no inspection has not passed one. Measured against the Dutch calendar day."},
+        {"name": "derived.apk_days_remaining", "type": "integer", "description": "Days until expiry, negative once past. Null when apk_expired is null."},
+        {"name": "derived.tachograph_expiry", "type": "string", "description": "Tachograph inspection expiry as ISO 8601. Null for the 98.8% of vehicles that have no tachograph. It runs on its own cycle and is not the APK."},
+        {"name": "derived.tachograph_expired", "type": "boolean", "description": "Null, never false, when there is no tachograph date or no usable clock."},
+        {"name": "derived.tachograph_days_remaining", "type": "integer", "description": "Days until the tachograph expiry, negative once past."},
+        {"name": "derived.first_admission", "type": "string", "description": "First admission to the road, ISO 8601."},
+        {"name": "derived.age_days", "type": "integer", "description": "Days since first admission."},
+        {"name": "derived.registered_since", "type": "string", "description": "Date of the current registration, ISO 8601."},
+        {"name": "derived.first_dutch_registration", "type": "string", "description": "First registration in the Netherlands, ISO 8601."},
+        {"name": "derived.dutch_registration_lag_days", "type": "integer", "description": "Days between first admission to the road and first Dutch registration. A positive number means the vehicle was on the road elsewhere first, which usually but not always means an import: RDW publishes no import flag, so this is the gap and not a verdict."},
+        {"name": "derived.fuels", "type": "array", "items": {"type": "string"}, "description": "Every fuel the vehicle runs on, in RDW's sequence. Empty when RDW records none."},
+        {"name": "derived.power_kw", "type": "number", "description": "Net maximum power of the primary fuel, in kW. Read from the electric power column when that is the one RDW filled in."},
+        {"name": "derived.co2_g_per_km", "type": "number", "description": "Combined CO2 in g/km."},
+        {"name": "derived.co2_basis", "type": "string", "enum_note": "wltp | nedc", "description": "Which test cycle produced co2_g_per_km. The two are not comparable, so the figure is never reported without it."},
+        {"name": "derived.electric_range_km", "type": "number", "description": "Electric range in km. Null, never 0, for a vehicle with no electric drive: RDW writes 0 into actieradius where the column does not apply, and 315,417 of those zeroes sit on diesel rows."},
+        {"name": "derived.engine_cc", "type": "integer", "description": "Engine displacement in cm3. Null, never 0, for a vehicle with no combustion engine."},
+        {"name": "derived.energy_label", "type": "string", "enum_note": "A | B | C | D | E | F | G", "description": "RDW's fuel economy grade. Null for most of the register: 7.128M of the 7.130M vehicles that have one are passenger cars."},
+        {"name": "derived.mass_empty_kg", "type": "integer"},
+        {"name": "derived.mass_max_kg", "type": "integer"},
+        {"name": "derived.tow_braked_kg", "type": "integer", "description": "Maximum braked towing mass. Null, never 0, when the vehicle may not tow: RDW leaves the column out rather than zeroing it."},
+        {"name": "derived.tow_unbraked_kg", "type": "integer", "description": "Maximum unbraked towing mass."},
+        {"name": "derived.length_cm", "type": "integer", "description": "Length in cm. RDW writes 0 into this column where it has no measurement, which is reported here as null: 430,531 passenger cars carry a 0 and not one of them is zero centimetres long."},
+        {"name": "derived.width_cm", "type": "integer", "description": "Width in cm, with the same 0 for unmeasured resolved to null."},
+        {"name": "derived.height_cm", "type": "integer", "description": "Height in cm, with the same 0 for unmeasured resolved to null."},
+        {"name": "derived.vin_location", "type": "string", "description": "Where the VIN is stamped on the vehicle, in RDW's own abbreviated Dutch, e.g. 'r. tegen schutbord onder motorkap'. Left as written rather than expanded."},
+        {"name": "derived.catalogue_price_eur", "type": "integer"},
+        {"name": "derived.odometer", "type": "string", "description": "consistent, inconsistent, or no_judgement. Null when RDW recorded no verdict, which is not the same as no_judgement: RDW looked and declined to judge."},
+        {"name": "derived.odometer_year", "type": "integer", "description": "Year of the most recent odometer reading RDW registered, 1961 through the current year. Independent of the verdict, which carries no date of its own: a history last read in 2016 and one read this year say the same word, and 730,494 vehicles have a reading year with no verdict at all."},
+        {"name": "derived.odometer_reason", "type": "string", "description": "RDW's own explanation of that verdict, resolved from the table embedded in this binary. Null when this build does not know the code."},
+        {"name": "derived.insured", "type": "boolean", "description": "Third-party (WAM) insurance on record."},
+        {"name": "derived.open_recall", "type": "boolean", "description": "Whether the register reports an unresolved recall."},
+        {"name": "derived.open_recall_count", "type": "integer", "description": "How many open recalls this run resolved. Null means the count is unknown, never that there are none: a register saying a recall is open while no recall row came back is a gap in the answer. Zero is only reported when RDW said there is no open recall."},
+        {"name": "derived.open_recall_hazards", "type": "array", "items": {"type": "string"}, "description": "The hazards those recalls name, deduplicated. Omitted whenever open_recall_count is absent, so an unresolved recall never reads as no hazards."},
+        {"name": "derived.exported", "type": "boolean"},
+        {"name": "derived.taxi", "type": "boolean"},
+        {"name": "derived.transferable", "type": "boolean", "description": "Whether the registration can be transferred."}
     ])
 }
 
@@ -328,15 +359,15 @@ fn defect_fields() -> Value {
     json!([
         {"name": "kenteken", "type": "string"},
         {"name": "gebrek_identificatie", "type": "string", "description": "RDW defect code, e.g. AC4."},
-        {"name": "gebrek_omschrijving", "type": "string | null", "description": "Description resolved from the table embedded in this binary. Null when this build does not know the code, never a placeholder."},
+        {"name": "gebrek_omschrijving", "type": "string", "description": "Description resolved from the table embedded in this binary. Null when this build does not know the code, never a placeholder."},
         {"name": "meld_datum_door_keuringsinstantie", "type": "string", "description": "Date the inspection body reported the defect, YYYYMMDD."},
         {"name": "aantal_gebreken_geconstateerd", "type": "string", "description": "How many instances of this defect were found."},
         {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the row. Rows arrive newest inspection first, so a page cut short by --limit shows the most recent.")},
-        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form."},
-        {"name": "derived.inspection_date", "type": "string | null", "description": "Inspection date as ISO 8601."},
-        {"name": "derived.code", "type": "string | null"},
-        {"name": "derived.description", "type": "string | null"},
-        {"name": "derived.count", "type": "integer | null", "description": "How many instances of this defect were found."}
+        {"name": "derived.plate", "type": "string", "description": "Plate in its readable grouped form."},
+        {"name": "derived.inspection_date", "type": "string", "description": "Inspection date as ISO 8601."},
+        {"name": "derived.code", "type": "string"},
+        {"name": "derived.description", "type": "string"},
+        {"name": "derived.count", "type": "integer", "description": "How many instances of this defect were found."}
     ])
 }
 
@@ -350,14 +381,14 @@ fn fuel_fields() -> Value {
         {"name": "emissie_co2_gecombineerd_wltp", "type": "string", "description": "Combined WLTP CO2 in g/km. Absent for vehicles predating WLTP."},
         {"name": "co2_uitstoot_gecombineerd", "type": "string", "description": "Combined NEDC CO2 in g/km."},
         {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the row, with the power and CO2 columns already reconciled.")},
-        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form."},
-        {"name": "derived.fuel", "type": "string | null"},
-        {"name": "derived.power_kw", "type": "number | null", "description": "Net maximum power in kW, from whichever column RDW filled in."},
-        {"name": "derived.co2_g_per_km", "type": "number | null"},
-        {"name": "derived.co2_basis", "type": "string | null", "description": "wltp or nedc: which test cycle produced co2_g_per_km."},
-        {"name": "derived.electric_range_km", "type": "number | null", "description": "Electric range in km. Null, never 0, for a vehicle with no electric drive: RDW writes 0 into actieradius where the column does not apply, and 315,417 of those zeroes sit on diesel rows."},
-        {"name": "derived.euro_class", "type": "string | null"},
-        {"name": "derived.consumption_l_per_100km", "type": "number | null"}
+        {"name": "derived.plate", "type": "string", "description": "Plate in its readable grouped form."},
+        {"name": "derived.fuel", "type": "string"},
+        {"name": "derived.power_kw", "type": "number", "description": "Net maximum power in kW, from whichever column RDW filled in."},
+        {"name": "derived.co2_g_per_km", "type": "number"},
+        {"name": "derived.co2_basis", "type": "string", "description": "wltp or nedc: which test cycle produced co2_g_per_km."},
+        {"name": "derived.electric_range_km", "type": "number", "description": "Electric range in km. Null, never 0, for a vehicle with no electric drive: RDW writes 0 into actieradius where the column does not apply, and 315,417 of those zeroes sit on diesel rows."},
+        {"name": "derived.euro_class", "type": "string"},
+        {"name": "derived.consumption_l_per_100km", "type": "number"}
     ])
 }
 
@@ -374,24 +405,24 @@ fn recall_fields() -> Value {
         {"name": "referentiecode_rdw", "type": "string", "description": "RDW's reference for the recall, and the key the other two datasets are joined on."},
         {"name": "code_status", "type": "string", "description": "O for open, P for a repair the manufacturer has reported."},
         {"name": "status", "type": "string", "description": "RDW's display text for that code, e.g. Openstaand."},
-        {"name": "recall", "type": "object | null", "description": "The row from RDW's recall dataset for this reference, untouched. Null when RDW published a status row for a reference it has no detail for, which happens and is left visible."},
-        {"name": "risks", "type": "array", "description": "The hazard rows for this reference, untouched. RDW files one row per hazard, so a recall routinely names several."},
+        {"name": "recall", "type": "object", "description": "The row from RDW's recall dataset for this reference, untouched. Null when RDW published a status row for a reference it has no detail for, which happens and is left visible."},
+        {"name": "risks", "type": "array", "items": {"type": "object"}, "description": "The hazard rows for this reference, untouched. RDW files one row per hazard, so a recall routinely names several."},
         {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the recall, with the three datasets already joined. Open recalls come first; within each group, RDW's own order is kept.")},
-        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form."},
-        {"name": "derived.reference", "type": "string | null", "description": "RDW's reference code for the recall."},
-        {"name": "derived.open", "type": "boolean | null", "description": "Whether the recall is still outstanding, read from code_status. Null when RDW recorded no status: reporting that as repaired would tell an owner their recall is done on no evidence."},
-        {"name": "derived.status", "type": "string | null", "description": "RDW's own words for the status."},
-        {"name": "derived.defect", "type": "string | null", "description": "What is wrong with the vehicle."},
-        {"name": "derived.category", "type": "string | null", "description": "RDW's classification of the defect."},
-        {"name": "derived.consequences", "type": "string | null", "description": "What the defect leads to if left unrepaired."},
-        {"name": "derived.hazards", "type": "string[]", "description": "The hazards this recall names, deduplicated and in RDW's order. Empty when RDW published none."},
-        {"name": "derived.repair", "type": "string | null", "description": "What the manufacturer does to fix it."},
-        {"name": "derived.manufacturer", "type": "string | null", "description": "The manufacturer or distributor that reported the recall."},
-        {"name": "derived.more_info_url", "type": "string | null"},
-        {"name": "derived.more_info_phone", "type": "string | null"},
-        {"name": "derived.published", "type": "string | null", "description": "Date RDW published the recall, ISO 8601."},
-        {"name": "derived.owners_informed", "type": "string | null", "description": "Date owners were informed, ISO 8601."},
-        {"name": "derived.vehicles_affected", "type": "integer | null", "description": "How many vehicles the recall covers in total, not how many are still unrepaired."}
+        {"name": "derived.plate", "type": "string", "description": "Plate in its readable grouped form."},
+        {"name": "derived.reference", "type": "string", "description": "RDW's reference code for the recall."},
+        {"name": "derived.open", "type": "boolean", "description": "Whether the recall is still outstanding, read from code_status. Null when RDW recorded no status: reporting that as repaired would tell an owner their recall is done on no evidence."},
+        {"name": "derived.status", "type": "string", "description": "RDW's own words for the status."},
+        {"name": "derived.defect", "type": "string", "description": "What is wrong with the vehicle."},
+        {"name": "derived.category", "type": "string", "description": "RDW's classification of the defect."},
+        {"name": "derived.consequences", "type": "string", "description": "What the defect leads to if left unrepaired."},
+        {"name": "derived.hazards", "type": "array", "items": {"type": "string"}, "description": "The hazards this recall names, deduplicated and in RDW's order. Empty when RDW published none."},
+        {"name": "derived.repair", "type": "string", "description": "What the manufacturer does to fix it."},
+        {"name": "derived.manufacturer", "type": "string", "description": "The manufacturer or distributor that reported the recall."},
+        {"name": "derived.more_info_url", "type": "string"},
+        {"name": "derived.more_info_phone", "type": "string"},
+        {"name": "derived.published", "type": "string", "description": "Date RDW published the recall, ISO 8601."},
+        {"name": "derived.owners_informed", "type": "string", "description": "Date owners were informed, ISO 8601."},
+        {"name": "derived.vehicles_affected", "type": "integer", "description": "How many vehicles the recall covers in total, not how many are still unrepaired."}
     ])
 }
 
@@ -404,12 +435,12 @@ fn inspection_fields() -> Value {
         {"name": "soort_erkenning_omschrijving", "type": "string", "description": "The accreditation the body filed it under."},
         {"name": "vervaldatum_keuring", "type": "string", "description": "The expiry this inspection produced, YYYYMMDD. Absent for a notification that produces none."},
         {"name": "derived", "type": "object", "description": derived_note("This tool's reading of the row. Rows arrive newest first, so a page cut short by --limit shows the most recent.")},
-        {"name": "derived.plate", "type": "string | null", "description": "Plate in its readable grouped form."},
-        {"name": "derived.date", "type": "string | null", "description": "Date filed, ISO 8601."},
-        {"name": "derived.kind", "type": "string | null", "description": "What was filed, in RDW's own words."},
-        {"name": "derived.accreditation", "type": "string | null"},
-        {"name": "derived.expiry", "type": "string | null", "description": "The expiry this inspection produced, ISO 8601. Null for a notification that produces none, which is not the same as an expiry in the past."},
-        {"name": "derived.alarm", "type": "string | null", "enum_note": "tachograph_tampering | tachograph_seal_broken", "description": "Set when the notification is a finding against the vehicle rather than a routine event: someone interfered with the instrument recording a professional driver's hours. Null for every other kind."}
+        {"name": "derived.plate", "type": "string", "description": "Plate in its readable grouped form."},
+        {"name": "derived.date", "type": "string", "description": "Date filed, ISO 8601."},
+        {"name": "derived.kind", "type": "string", "description": "What was filed, in RDW's own words."},
+        {"name": "derived.accreditation", "type": "string"},
+        {"name": "derived.expiry", "type": "string", "description": "The expiry this inspection produced, ISO 8601. Null for a notification that produces none, which is not the same as an expiry in the past."},
+        {"name": "derived.alarm", "type": "string", "enum_note": "tachograph_tampering | tachograph_seal_broken", "description": "Set when the notification is a finding against the vehicle rather than a routine event: someone interfered with the instrument recording a professional driver's hours. Null for every other kind."}
     ])
 }
 
