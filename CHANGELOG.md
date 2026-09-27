@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.6](https://github.com/rvben/kenteken/compare/v0.2.5...v0.2.6) - 2026-09-27
+
+### Fixed
+
+- **deps**: update rustls to 0.23.45 for RUSTSEC-2026-0285 ([302fddb](https://github.com/rvben/kenteken/commit/302fddbe39a31f09f63719466909a71b4ab35907))
+- **ci**: install pinned Rust components ([afa1b59](https://github.com/rvben/kenteken/commit/afa1b593675b308ecad6397e935f0a2a296463db))
+
 ## [0.2.4](https://github.com/rvben/kenteken/compare/v0.2.3...v0.2.4) - 2026-08-05
 
 ### Fixed
