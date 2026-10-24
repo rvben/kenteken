@@ -44,6 +44,14 @@ grey: `VERLOPEN`, `NIET VERZEKERD`, `OPENSTAAND`, `ONLOGISCH`,
 
 ## Install
 
+### Homebrew
+
+```sh
+brew install rvben/tap/kenteken
+```
+
+### Other installation methods
+
 ```sh
 cargo install kenteken
 uv tool install kenteken     # or: pipx install kenteken
